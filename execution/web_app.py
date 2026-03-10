@@ -236,10 +236,13 @@ if st.button("🚀 Importar & Gerar Dashboard", type="primary"):
 
 st.markdown("---")
 st.markdown("## 📝 Preencher Planilha (TC, Métricas e Gasto)")
-st.markdown("Lê os anúncios na **Coluna B** da aba `032026` e preenche a **Coluna A** apenas se estiver Vazia (mantendo as já mescladas). Também processa a Tabela de Métricas (**Hook Rate, Body View, CPM, CTR, CPC, Gasto**) APENAS para as linhas onde a **Coluna M (Status)** for escrita como `TESTE`.")
+st.markdown("Faça o upload da sua planilha Excel. O robô irá processá-la e gerar um botão para você baixá-la preenchida com os dados da API.")
 
-if st.button("✍️ Preencher Planilha", type="primary"):
-    from fill_creative_tests import fill_creative_tests
+uploaded_file = st.file_uploader("📂 Faça o Upload da sua planilha base (.xlsx)", type=["xlsx"])
+
+if uploaded_file:
+    if st.button("✍️ Iniciar Preenchimento", type="primary"):
+        from fill_creative_tests import fill_creative_tests
     
     if not selected_account_ids:
         st.error("Selecione uma ou mais Contas de Anúncios antes de preencher a planilha.")
@@ -256,6 +259,7 @@ if st.button("✍️ Preencher Planilha", type="primary"):
                     account_ids=selected_account_ids,
                     date_start=date_start.strftime('%Y-%m-%d'),
                     date_end=padded_date_end.strftime('%Y-%m-%d'),
+                    excel_file=uploaded_file,
                     fb_token=fb_token,
                     redtrack_token=rt_token,
                     progress_callback=fill_progress_cb,
@@ -269,6 +273,19 @@ if st.button("✍️ Preencher Planilha", type="primary"):
                         st.write("Verifique se o nome exato inserido na planilha existe no final do nome de alguma campanha ativa desta conta:")
                         st.write("`, `".join(result['not_found']))
                         
+                # Create a download button for the modified buffer
+                st.markdown("---")
+                st.markdown("### 🎉 Download da sua planilha pronta!")
+                st.download_button(
+                    label="📥 Baixar Planilha Atualizada",
+                    data=result['file_buffer'],
+                    file_name="Planilha_Preenchida.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary"
+                )
+                        
             except Exception as e:
                 fill_status.update(label="Erro ao preencher planilha", state="error", expanded=True)
                 st.error(f"❌ Erro: {e}")
+else:
+    st.info("👆 Por favor, envie o seu arquivo Excel no campo acima para habilitar o preenchimento.")

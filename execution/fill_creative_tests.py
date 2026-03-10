@@ -22,7 +22,6 @@ import time
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font
 
-EXCEL_FILE = r"C:\Preencher planilha\FB - LOTTO V7.xlsx"
 MAIN_SHEET = "032026"
 DATA_START_ROW = 4
 
@@ -177,6 +176,7 @@ def fill_creative_tests(
     account_ids: list, 
     date_start: str, 
     date_end: str, 
+    excel_file,
     fb_token: str = None,
     redtrack_token: str = None,
     fb_api_instance=None, 
@@ -230,9 +230,9 @@ def fill_creative_tests(
         progress_callback("Varrendo planilha e extraindo dados específicos por linha (Dynamic Dates)...")
 
     try:
-        wb = load_workbook(EXCEL_FILE)
-    except PermissionError:
-        raise PermissionError(f"O Arquivo Excel está aberto. Feche a planilha e tente novamente.")
+        wb = load_workbook(excel_file)
+    except Exception as e:
+        raise RuntimeError(f"Erro ao abrir arquivo enviado: {e}")
     
     ws = wb[MAIN_SHEET]
 
@@ -396,10 +396,12 @@ def fill_creative_tests(
 
         filled_pre_escala += 1
 
+    from io import BytesIO
+    output = BytesIO()
     try:
-        wb.save(EXCEL_FILE)
-    except PermissionError:
-        raise PermissionError(f"Não foi possível salvar! O arquivo '{EXCEL_FILE}' está aberto no Excel.")
+        wb.save(output)
+    except Exception as e:
+        raise RuntimeError(f"Não foi possível processar e salvar a planilha na memória: {e}")
 
     return {
         "filled_a": filled_a, 
@@ -407,5 +409,6 @@ def fill_creative_tests(
         "skipped_rows": skipped_rows, 
         "not_found": not_found,
         "filled_pre_escala": filled_pre_escala,
-        "skipped_pre_escala": skipped_pre_escala
+        "skipped_pre_escala": skipped_pre_escala,
+        "file_buffer": output.getvalue()
     }
