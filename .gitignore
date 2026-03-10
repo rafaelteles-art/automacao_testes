@@ -1,0 +1,25 @@
+# Environment variables
+.env
+
+# Credentials
+credentials.json
+token.json
+
+# Intermediate processing files
+.tmp/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Data files
+*.xlsx
+~$*
+*.csv
+dashboard.html
