@@ -125,36 +125,40 @@ def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
     
     import time
     page = 1
-    while page <= 5: # Limit pagination for row-by-row fetching to prevent lockups
-        success = False
-        rt_data = []
-        for _ in range(3):
-            r = requests.get('https://api.redtrack.io/report', params={
-                'api_key': rt_token,
-                'date_from': since,
-                'date_to': until,
-                'group': 'rt_ad',
-                'limit': 1000,
-                'page': page
-            }, timeout=30)
-            
-            if r.status_code == 200:
-                rt_data = r.json()
-                success = True
-                break
-            elif r.status_code == 429 or r.status_code >= 500:
-                time.sleep(2)
-                continue
-            else:
-                break
+    
+    def internal_fetch(p_num):
+        for retry in range(4):
+            try:
+                r = requests.get('https://api.redtrack.io/report', params={
+                    'api_key': rt_token,
+                    'date_from': since,
+                    'date_to': until,
+                    'group': 'rt_ad',
+                    'limit': 2000,
+                    'page': p_num
+                }, timeout=30)
                 
+                if r.status_code == 200:
+                    return r.json(), True
+                elif r.status_code == 429 or r.status_code >= 500:
+                    time.sleep(2 ** retry) # Exponential backoff: 1s, 2s, 4s, 8s
+                    continue
+                else:
+                    return [], False
+            except requests.RequestException:
+                time.sleep(2 ** retry)
+                continue
+        return [], False
+
+    # First Pass
+    while page <= 5:
+        rt_data, success = internal_fetch(page)
         if not success or not rt_data: break
         
         for r_row in rt_data:
             rt_ad = str(r_row.get('rt_ad', '')).strip().lower()
             if not rt_ad: continue
             
-            # Match condition logic - EXACT match first, then prefix extraction
             is_match = False
             if rt_ad == ad_name_lower:
                 is_match = True
@@ -167,8 +171,29 @@ def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
                 roas_val = float(r_row.get('roas', 0))
                 if roas_val != 0: roas = roas_val
         
-        if len(rt_data) < 1000: break
+        if len(rt_data) < 2000: break
         page += 1
+
+    # DOUBLE CHECK logic: if intermittent API drop caused 0 data, force a second pass after sleeping
+    if vendas == 0 and cost == 0:
+        time.sleep(3)
+        rt_data_dc, success_dc = internal_fetch(1)
+        if success_dc and rt_data_dc:
+            for r_row in rt_data_dc:
+                rt_ad = str(r_row.get('rt_ad', '')).strip().lower()
+                if not rt_ad: continue
+                
+                is_match = False
+                if rt_ad == ad_name_lower:
+                    is_match = True
+                elif rt_ad == ad_name_lower.split(" - ")[0].split(" ")[0]:
+                    is_match = True
+                    
+                if is_match:
+                    vendas += float(r_row.get('convtype2', 0))
+                    cost += float(r_row.get('cost', 0))
+                    roas_val = float(r_row.get('roas', 0))
+                    if roas_val != 0: roas = roas_val
 
     return {"vendas": vendas, "cost": cost, "roas": roas}
 
