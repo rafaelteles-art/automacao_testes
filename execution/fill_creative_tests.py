@@ -19,8 +19,7 @@ import os
 import requests
 import datetime
 import time
-from openpyxl import load_workbook
-from openpyxl.styles import Alignment, Font
+import gspread
 
 MAIN_SHEET = "032026"
 DATA_START_ROW = 4
@@ -201,11 +200,13 @@ def fill_creative_tests(
     account_ids: list, 
     date_start: str, 
     date_end: str, 
-    excel_file,
+    g_url: str,
+    sheet_name: str,
     fb_token: str = None,
     redtrack_token: str = None,
     fb_api_instance=None, 
-    progress_callback=None
+    progress_callback=None,
+    gc=None
 ):
     token = fb_token or DEFAULT_FB_TOKEN
 
@@ -250,16 +251,22 @@ def fill_creative_tests(
     if not ad_to_campaign:
         raise RuntimeError("Nenhuma campanha válida encontrada para as contas selecionadas.")
 
-    # 3. Read Excel and Process Row-by-Row
+    # 3. Read Google Sheets and Process Row-by-Row
     if progress_callback:
-        progress_callback("Varrendo planilha e extraindo dados específicos por linha (Dynamic Dates)...")
+        progress_callback("Varrendo Google Sheets e extraindo dados específicos por linha (Dynamic Dates)...")
+
+    if not gc:
+        raise RuntimeError("Cliente gspread não fornecido para autenticação.")
 
     try:
-        wb = load_workbook(excel_file)
+        sh = gc.open_by_url(g_url)
+        ws = sh.worksheet(sheet_name)
     except Exception as e:
-        raise RuntimeError(f"Erro ao abrir arquivo enviado: {e}")
+        raise RuntimeError(f"Erro ao abrir Google Sheet. Verifique o link e se a aba existe: {e}")
     
-    ws = wb[MAIN_SHEET]
+    all_values = ws.get_all_values()
+    max_row = len(all_values)
+    cells_to_update = []
 
     filled_a = 0
     filled_metrics = 0
@@ -267,9 +274,10 @@ def fill_creative_tests(
     not_found = []
 
     # Process TESTES Completos Section
-    for row_idx in range(DATA_START_ROW, ws.max_row + 1):
-        ad_name_cell = ws.cell(row=row_idx, column=2)
-        ad_name_value = ad_name_cell.value
+    for row_idx in range(DATA_START_ROW, max_row + 1):
+        row_data = all_values[row_idx - 1]
+        
+        ad_name_value = row_data[1] if len(row_data) > 1 else "" # Col B
         if not ad_name_value or str(ad_name_value).strip() == "":
             continue
 
@@ -292,23 +300,20 @@ def fill_creative_tests(
         c_id = matched_info["id"]
 
         # Col A Logic
-        cell_a = ws.cell(row=row_idx, column=1)
-        if type(cell_a).__name__ != 'MergedCell':
-            if not cell_a.value or str(cell_a.value).strip() == "":
-                label = build_col_a_label(c_name)
-                if label:
-                    cell_a.value = label
-                    cell_a.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                    cell_a.font = Font(bold=True)
-                    filled_a += 1
+        cell_a_val = row_data[0] if len(row_data) > 0 else ""
+        if not cell_a_val or str(cell_a_val).strip() == "":
+            label = build_col_a_label(c_name)
+            if label:
+                cells_to_update.append(gspread.Cell(row=row_idx, col=1, value=label))
+                filled_a += 1
 
         # Check Col M Status
-        status_cell = ws.cell(row=row_idx, column=13)
-        current_status = str(status_cell.value).strip().upper() if status_cell.value else ""
+        status_val = row_data[12] if len(row_data) > 12 else ""
+        current_status = str(status_val).strip().upper()
         
         if "TESTE" in current_status:
             # Get specific start date from Col C (column 3)
-            date_col_c = ws.cell(row=row_idx, column=3).value
+            date_col_c = row_data[2] if len(row_data) > 2 else ""
             row_date_start = parse_excel_date(date_col_c, date_start)
             
             # Fetch FB data dynamically for this row
@@ -318,25 +323,19 @@ def fill_creative_tests(
             cpm_brl = fin["cpm"] * usd_to_brl
             spend_brl = fin["spend"] * usd_to_brl
             
-            # Write metrics...
-            c5 = ws.cell(row=row_idx, column=5, value=fin["hook_rate"])
-            c5.number_format = '0.00%'
-            c6 = ws.cell(row=row_idx, column=6, value=fin["body_rate"])
-            c6.number_format = '0.00%'
-            c7 = ws.cell(row=row_idx, column=7, value=cpm_brl)
-            c7.number_format = '#,##0.00'
-            c8 = ws.cell(row=row_idx, column=8, value=fin["ctr"])
-            c8.number_format = '0.00%'
-            c9 = ws.cell(row=row_idx, column=9, value=cpc_brl)
-            c9.number_format = '#,##0.00'
-            c10 = ws.cell(row=row_idx, column=10, value=spend_brl)
-            c10.number_format = '#,##0.00'
+            # Queue metric updates
+            cells_to_update.append(gspread.Cell(row=row_idx, col=5, value=fin["hook_rate"]))
+            cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=fin["body_rate"]))
+            cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=round(cpm_brl, 2)))
+            cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=fin["ctr"]))
+            cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=round(cpc_brl, 2)))
+            cells_to_update.append(gspread.Cell(row=row_idx, col=10, value=round(spend_brl, 2)))
             
             # Fetch RedTrack dynamically for this row
             rt = fetch_rt_for_ad(search_term, row_date_start, date_end, redtrack_token)
             vendas = rt["vendas"]
             
-            ws.cell(row=row_idx, column=11, value=vendas)
+            cells_to_update.append(gspread.Cell(row=row_idx, col=11, value=vendas))
             
             cpa = 0
             if vendas > 0:
@@ -344,31 +343,11 @@ def fill_creative_tests(
             else:
                 cpa = 0 # Forced fallback to 0
                 
-            c12 = ws.cell(row=row_idx, column=12, value=cpa)
-            c12.number_format = '#,##0.00'
+            cells_to_update.append(gspread.Cell(row=row_idx, col=12, value=round(cpa, 2)))
 
             filled_metrics += 1
         else:
             skipped_rows += 1
-
-    # Re-merge Col A
-    merge_groups = 0
-    row = DATA_START_ROW
-    while row <= ws.max_row:
-        cell_val = ws.cell(row=row, column=1).value
-        if not cell_val:
-            row += 1
-            continue
-        end_row = row
-        while end_row + 1 <= ws.max_row and ws.cell(row=end_row + 1, column=1).value == cell_val:
-            end_row += 1
-        if end_row > row:
-            ws.merge_cells(start_row=row, start_column=1, end_row=end_row, end_column=1)
-            merged_cell = ws.cell(row=row, column=1)
-            merged_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            merged_cell.font = Font(bold=True)
-            merge_groups += 1
-        row = end_row + 1
 
     # Process PRÉ-ESCALA Section
     filled_pre_escala = 0
@@ -376,23 +355,21 @@ def fill_creative_tests(
     if progress_callback:
         progress_callback("Preenchendo seção PRÉ-ESCALA com datas dinâmicas...")
 
-    for row_idx in range(DATA_START_ROW, ws.max_row + 1):
-        creative_cell = ws.cell(row=row_idx, column=15)  # Col O
-        creative_val = creative_cell.value
+    for row_idx in range(DATA_START_ROW, max_row + 1):
+        row_data = all_values[row_idx - 1]
+        creative_val = row_data[14] if len(row_data) > 14 else ""  # Col O
         if not creative_val or str(creative_val).strip() == "":
             continue
 
-        status_pe = ws.cell(row=row_idx, column=22)  # Col V
-        status_pe_str = str(status_pe.value).strip().upper() if status_pe.value else ""
-        if "TESTE" not in status_pe_str:
+        status_pe_str = row_data[21] if len(row_data) > 21 else ""  # Col V
+        if "TESTE" not in str(status_pe_str).strip().upper():
             skipped_pre_escala += 1
             continue
 
         search_pe = str(creative_val).strip().lower()
         
         # Determine Row Date - Col P uses column 16
-        date_col_p = ws.cell(row=row_idx, column=16).value
-        # For Pré-Escala, parse_excel_date reads from Col P
+        date_col_p = row_data[15] if len(row_data) > 15 else ""
         row_date_pe = parse_excel_date(date_col_p, date_start)
         
         # RedTrack Fetch
@@ -408,25 +385,20 @@ def fill_creative_tests(
         else:
             cpa_pe = 0 # forced fallback
         
-        c_r = ws.cell(row=row_idx, column=18, value=cost_brl)
-        c_r.number_format = '#,##0.00'
-        
-        ws.cell(row=row_idx, column=19, value=vendas_pe)
-        
-        c_t = ws.cell(row=row_idx, column=20, value=roas_pe)
-        c_t.number_format = '0.00'
-        
-        c_u = ws.cell(row=row_idx, column=21, value=cpa_pe)
-        c_u.number_format = '#,##0.00'
+        cells_to_update.append(gspread.Cell(row=row_idx, col=18, value=round(cost_brl, 2)))
+        cells_to_update.append(gspread.Cell(row=row_idx, col=19, value=vendas_pe))
+        cells_to_update.append(gspread.Cell(row=row_idx, col=20, value=round(roas_pe, 2)))
+        cells_to_update.append(gspread.Cell(row=row_idx, col=21, value=round(cpa_pe, 2)))
 
         filled_pre_escala += 1
 
-    from io import BytesIO
-    output = BytesIO()
-    try:
-        wb.save(output)
-    except Exception as e:
-        raise RuntimeError(f"Não foi possível processar e salvar a planilha na memória: {e}")
+    # Batch Update All Cells
+    if cells_to_update:
+        if progress_callback: progress_callback("⏳ Enviando alterações ao vivo para o Google Sheets...")
+        try:
+            ws.update_cells(cells_to_update, value_input_option='USER_ENTERED')
+        except Exception as e:
+            raise RuntimeError(f"Erro ao salvar alterações no Google Sheets. Você precisa compartilhar a planilha como Editor com o robô! Erro: {e}")
 
     return {
         "filled_a": filled_a, 
@@ -434,6 +406,5 @@ def fill_creative_tests(
         "skipped_rows": skipped_rows, 
         "not_found": not_found,
         "filled_pre_escala": filled_pre_escala,
-        "skipped_pre_escala": skipped_pre_escala,
-        "file_buffer": output.getvalue()
+        "skipped_pre_escala": skipped_pre_escala
     }

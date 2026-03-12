@@ -235,57 +235,95 @@ if st.button("🚀 Importar & Gerar Dashboard", type="primary"):
             render_dashboard(df, campaign_filter)
 
 st.markdown("---")
-st.markdown("## 📝 Preencher Planilha (TC, Métricas e Gasto)")
-st.markdown("Faça o upload da sua planilha Excel. O robô irá processá-la e gerar um botão para você baixá-la preenchida com os dados da API.")
+st.markdown("## 📝 Preencher Planilha (Google Sheets)")
+st.markdown("Insira o Link da sua Planilha do Google e selecione a Aba.")
 
-uploaded_file = st.file_uploader("📂 Faça o Upload da sua planilha base (.xlsx)", type=["xlsx"])
+import gspread
+from google.oauth2.service_account import Credentials
+import json
 
-if uploaded_file:
-    if st.button("✍️ Iniciar Preenchimento", type="primary"):
-        from fill_creative_tests import fill_creative_tests
-    
-    if not selected_account_ids:
-        st.error("Selecione uma ou mais Contas de Anúncios antes de preencher a planilha.")
-    else:
-        with st.status("Preenchendo planilha...", expanded=True) as fill_status:
-            fill_progress = st.empty()
-
-            def fill_progress_cb(msg):
-                fill_progress.write(f"⏳ {msg}")
-
-            try:
-                padded_date_end = date_end + timedelta(days=1)
-                result = fill_creative_tests(
-                    account_ids=selected_account_ids,
-                    date_start=date_start.strftime('%Y-%m-%d'),
-                    date_end=padded_date_end.strftime('%Y-%m-%d'),
-                    excel_file=uploaded_file,
-                    fb_token=fb_token,
-                    redtrack_token=rt_token,
-                    progress_callback=fill_progress_cb,
-                )
-                fill_status.update(label="Planilha preenchida com sucesso! ✅", state="complete", expanded=False)
-                pe_msg = f"\n\n📈 PRÉ-ESCALA: {result.get('filled_pre_escala', 0)} criativos preenchidos (Gasto, Vendas, ROAS, CPA)." if result.get('filled_pre_escala', 0) > 0 else ""
-                st.success(f"✅ Sucesso! Foram preenchidos {result['filled_metrics']} Testes Completos (E, F, G, H, I, J).\n\n📊 {result['filled_a']} novas marcações criadas na Coluna A.\n⏭️ {result['skipped_rows']} linhas foram puladas (Coluna M diferente de TESTE).{pe_msg}")
+@st.cache_resource
+def get_gspread_client():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    try:
+        if "gcp_service_account" in st.secrets:
+            # Load from secrets (assuming it's a dict or JSON string)
+            secret_info = st.secrets["gcp_service_account"]
+            if isinstance(secret_info, str):
+                secret_info = json.loads(secret_info)
+            else:
+                # Convert explicitly to a dict (st.secrets returns a SecretDict object, but from_service_account expects standard dict)
+                secret_info = dict(secret_info)
                 
-                if result['not_found']:
-                    with st.expander(f"⚠️ {len(result['not_found'])} Anúncios da Coluna B não encontrados nas campanhas:"):
-                        st.write("Verifique se o nome exato inserido na planilha existe no final do nome de alguma campanha ativa desta conta:")
-                        st.write("`, `".join(result['not_found']))
+            creds = Credentials.from_service_account_info(secret_info, scopes=scopes)
+            return gspread.authorize(creds)
+        elif os.path.exists("credentials.json"):
+            creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+            return gspread.authorize(creds)
+    except Exception as e:
+        import traceback
+        st.error(f"Erro ao carregar credenciais: {e} | {traceback.format_exc()}")
+    return None
+
+gc = get_gspread_client()
+
+if gc is None:
+    st.warning("⚠️ **Autenticação Pendente:** Para acessar o Google Sheets, você precisa configurar um arquivo `credentials.json` na raiz do projeto ou no Streamlit Secrets em `[gcp_service_account]`.")
+    st.stop()
+
+# Connection UI
+g_url = st.text_input("🔗 Link da Planilha do Google (ex: https://docs.google.com/spreadsheets/d/...)")
+
+if g_url:
+    try:
+        # Load the spreadsheet
+        with st.spinner("Conectando ao Google Sheets..."):
+            sh = gc.open_by_url(g_url)
+            worksheets = sh.worksheets()
+            sheet_names = [ws.title for ws in worksheets]
+        
+        selected_sheet = st.selectbox("📋 Selecione a Aba para preencher", sheet_names)
+        
+        if st.button("✍️ Iniciar Preenchimento na Nuvem", type="primary"):
+            from fill_creative_tests import fill_creative_tests
+            
+            if not selected_account_ids:
+                st.error("Selecione uma ou mais Contas de Anúncios antes de iniciar.")
+            else:
+                with st.status("Preenchendo planilha online...", expanded=True) as fill_status:
+                    fill_progress = st.empty()
+
+                    def fill_progress_cb(msg):
+                        fill_progress.write(f"⏳ {msg}")
+
+                    try:
+                        padded_date_end = date_end + timedelta(days=1)
+                        result = fill_creative_tests(
+                            account_ids=selected_account_ids,
+                            date_start=date_start.strftime('%Y-%m-%d'),
+                            date_end=padded_date_end.strftime('%Y-%m-%d'),
+                            g_url=g_url,
+                            sheet_name=selected_sheet,
+                            fb_token=fb_token,
+                            redtrack_token=rt_token,
+                            progress_callback=fill_progress_cb,
+                            gc=gc # Pass the authenticated client
+                        )
+                        fill_status.update(label="Planilha do Google atualizada com sucesso! ✅", state="complete", expanded=False)
+                        pe_msg = f"\n\n📈 PRÉ-ESCALA: {result.get('filled_pre_escala', 0)} criativos preenchidos (Gasto, Vendas, ROAS, CPA)." if result.get('filled_pre_escala', 0) > 0 else ""
+                        st.success(f"✅ Sucesso! A aba '{selected_sheet}' foi atualizada ao vivo.\nForam preenchidos {result['filled_metrics']} Testes Completos.\n\n📊 {result['filled_a']} novas marcações na Coluna A.\n⏭️ {result['skipped_rows']} linhas foram puladas.{pe_msg}")
                         
-                # Create a download button for the modified buffer
-                st.markdown("---")
-                st.markdown("### 🎉 Download da sua planilha pronta!")
-                st.download_button(
-                    label="📥 Baixar Planilha Atualizada",
-                    data=result['file_buffer'],
-                    file_name="Planilha_Preenchida.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary"
-                )
-                        
-            except Exception as e:
-                fill_status.update(label="Erro ao preencher planilha", state="error", expanded=True)
-                st.error(f"❌ Erro: {e}")
-else:
-    st.info("👆 Por favor, envie o seu arquivo Excel no campo acima para habilitar o preenchimento.")
+                        if result['not_found']:
+                            with st.expander(f"⚠️ {len(result['not_found'])} Anúncios não encontrados nas campanhas:"):
+                                st.write("Verifique se o nome inserido na planilha existe no final do nome de alguma campanha ativa desta conta:")
+                                st.write("`, `".join(result['not_found']))
+                                
+                    except gspread.exceptions.APIError as e:
+                        fill_status.update(label="Erro de Permissão no Google Sheets", state="error", expanded=True)
+                        st.error(f"❌ O Google recusou a alteração. A planilha está compartilhada com o e-mail do robô (`client_email` do credentials.json) como Editor? Erro: {e}")
+                    except Exception as e:
+                        fill_status.update(label="Erro ao preencher planilha", state="error", expanded=True)
+                        import traceback
+                        st.error(f"❌ Erro fatal: {e} | {traceback.format_exc()}")
+    except Exception as e:
+        st.error(f"❌ Não foi possível acessar a planilha. Verifique o link ou se o e-mail do robô foi adicionado como Editor no Google Sheets! ({e})")
