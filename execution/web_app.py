@@ -310,20 +310,23 @@ if g_url:
                             gc=gc # Pass the authenticated client
                         )
                         fill_status.update(label="Planilha do Google atualizada com sucesso! ✅", state="complete", expanded=False)
-                        pe_msg = f"\n\n📈 PRÉ-ESCALA: {result.get('filled_pre_escala', 0)} criativos preenchidos (Gasto, Vendas, ROAS, CPA)." if result.get('filled_pre_escala', 0) > 0 else ""
-                        st.success(f"✅ Sucesso! A aba '{selected_sheet}' foi atualizada ao vivo.\nForam preenchidos {result['filled_metrics']} Testes Completos.\n\n📊 {result['filled_a']} novas marcações na Coluna A.\n⏭️ {result['skipped_rows']} linhas foram puladas.{pe_msg}")
-                        
-                        if result['not_found']:
-                            with st.expander(f"⚠️ {len(result['not_found'])} Anúncios não encontrados nas campanhas:"):
-                                st.write("Verifique se o nome inserido na planilha existe no final do nome de alguma campanha ativa desta conta:")
-                                st.write("`, `".join(result['not_found']))
-                                
                     except gspread.exceptions.APIError as e:
                         fill_status.update(label="Erro de Permissão no Google Sheets", state="error", expanded=True)
                         st.error(f"❌ O Google recusou a alteração. A planilha está compartilhada com o e-mail do robô (`client_email` do credentials.json) como Editor? Erro: {e}")
+                        result = None
                     except Exception as e:
                         fill_status.update(label="Erro ao preencher planilha", state="error", expanded=True)
                         import traceback
                         st.error(f"❌ Erro fatal: {e} | {traceback.format_exc()}")
+                        result = None
+                        
+                if result:
+                    pe_msg = f"\n\n📈 PRÉ-ESCALA: {result.get('filled_pre_escala', 0)} criativos preenchidos (Gasto, Vendas, ROAS, CPA)." if result.get('filled_pre_escala', 0) > 0 else ""
+                    st.success(f"✅ Sucesso! A aba '{selected_sheet}' foi atualizada ao vivo.\nForam preenchidos {result['filled_metrics']} Testes Completos.\n\n📊 {result['filled_a']} novas marcações na Coluna A.\n⏭️ {result['skipped_rows']} linhas foram puladas.{pe_msg}")
+                    
+                    if result['not_found']:
+                        with st.expander(f"⚠️ {len(result['not_found'])} Anúncios não encontrados nas campanhas:"):
+                            st.write("Verifique se o nome inserido na planilha existe no final do nome de alguma campanha ativa desta conta:")
+                            st.write("`, `".join(result['not_found']))
     except Exception as e:
         st.error(f"❌ Não foi possível acessar a planilha. Verifique o link ou se o e-mail do robô foi adicionado como Editor no Google Sheets! ({e})")
