@@ -101,7 +101,8 @@ def fetch_fb_insights_for_campaign(c_id, since, until, fb_token):
                     "cpc": float(row.get("cpc", 0.0)),
                     "ctr": (float(row.get("ctr", 0.0)) / 100),
                     "hook_rate": (video_3s_views / imps) if imps > 0 else 0,
-                    "body_rate": (p75 / imps) if imps > 0 else 0
+                    "body_rate": (p75 / imps) if imps > 0 else 0,
+                    "impressions": imps
                 }
             break
         elif r.status_code == 429 or r.status_code >= 500:
@@ -112,7 +113,8 @@ def fetch_fb_insights_for_campaign(c_id, since, until, fb_token):
 
     return {
         "spend": 0.0, "cpm": 0.0, "cpc": 0.0,
-        "ctr": 0.0, "hook_rate": 0.0, "body_rate": 0.0
+        "ctr": 0.0, "hook_rate": 0.0, "body_rate": 0.0,
+        "impressions": 0.0
     }
 
 def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
@@ -246,7 +248,8 @@ def fill_creative_tests(
             extracted = extract_ad_name_from_campaign(c_name)
             if extracted:
                 key = extracted.strip().lower()
-                if key not in ad_to_campaign: ad_to_campaign[key] = {"id": c_id, "name": c_name}
+                if key not in ad_to_campaign: ad_to_campaign[key] = []
+                ad_to_campaign[key].append({"id": c_id, "name": c_name})
 
     if not ad_to_campaign:
         raise RuntimeError("Nenhuma campanha válida encontrada para as contas selecionadas.")
@@ -282,22 +285,21 @@ def fill_creative_tests(
             continue
 
         search_term = str(ad_name_value).strip().lower()
-        matched_info = None
+        matched_infos = []
         
         if search_term in ad_to_campaign:
-            matched_info = ad_to_campaign[search_term]
+            matched_infos = ad_to_campaign[search_term]
         else:
-            for key, info in ad_to_campaign.items():
+            for key, infos in ad_to_campaign.items():
                 if search_term in key or key in search_term:
-                    matched_info = info
+                    matched_infos = infos
                     break
 
-        if not matched_info:
+        if not matched_infos:
             not_found.append(str(ad_name_value))
             continue
             
-        c_name = matched_info["name"]
-        c_id = matched_info["id"]
+        c_name = matched_infos[0]["name"]
 
         # Col A Logic
         cell_a_val = row_data[0] if len(row_data) > 0 else ""
@@ -316,12 +318,29 @@ def fill_creative_tests(
             date_col_c = row_data[2] if len(row_data) > 2 else ""
             row_date_start = parse_excel_date(date_col_c, date_start)
             
-            # Fetch FB data dynamically for this row
-            fin = fetch_fb_insights_for_campaign(c_id, row_date_start, date_end, token)
+            best_fin = None
+            max_imps = -1
+            
+            # Check all matched campaigns and pick the one with most impressions
+            for info in matched_infos:
+                fin = fetch_fb_insights_for_campaign(info["id"], row_date_start, date_end, token)
+                imps = fin.get("impressions", 0)
+                if imps > max_imps:
+                    max_imps = imps
+                    best_fin = fin
+                    
+            if not best_fin:
+                best_fin = {"spend": 0.0, "cpm": 0.0, "cpc": 0.0, "ctr": 0.0, "hook_rate": 0.0, "body_rate": 0.0, "impressions": 0.0}
+            
+            fin = best_fin
             
             cpc_brl = fin["cpc"] * usd_to_brl
             cpm_brl = fin["cpm"] * usd_to_brl
-            spend_brl = fin["spend"] * usd_to_brl
+            
+            # Fetch RedTrack dynamically for this row
+            rt = fetch_rt_for_ad(search_term, row_date_start, date_end, redtrack_token)
+            vendas = rt["vendas"]
+            rt_cost_brl = rt["cost"]
             
             # Queue metric updates
             cells_to_update.append(gspread.Cell(row=row_idx, col=5, value=fin["hook_rate"]))
@@ -329,17 +348,13 @@ def fill_creative_tests(
             cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=round(cpm_brl, 2)))
             cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=fin["ctr"]))
             cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=round(cpc_brl, 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=10, value=round(spend_brl, 2)))
-            
-            # Fetch RedTrack dynamically for this row
-            rt = fetch_rt_for_ad(search_term, row_date_start, date_end, redtrack_token)
-            vendas = rt["vendas"]
+            cells_to_update.append(gspread.Cell(row=row_idx, col=10, value=round(rt_cost_brl, 2))) # Pull Gasto from RedTrack
             
             cells_to_update.append(gspread.Cell(row=row_idx, col=11, value=vendas))
             
             cpa = 0
             if vendas > 0:
-                cpa = spend_brl / vendas
+                cpa = rt_cost_brl / vendas
             else:
                 cpa = 0 # Forced fallback to 0
                 
