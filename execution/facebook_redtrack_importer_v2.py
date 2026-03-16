@@ -38,19 +38,41 @@ class FacebookAdsAPI:
             return []
     
     def get_ad_accounts(self, business_manager_id: str) -> List[Dict]:
-        """Get all ad accounts from a business manager"""
+        """Get all ad accounts from a business manager (owned and shared/client)"""
+        all_accounts = []
+        seen_ids = set()
+        
+        # 1. Fetch owned ad accounts
         try:
-            url = f"{self.base_url}/{business_manager_id}/owned_ad_accounts"
+            url_owned = f"{self.base_url}/{business_manager_id}/owned_ad_accounts"
             params = {
                 'fields': 'id,name,currency,account_status',
                 'limit': 100
             }
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            return response.json().get('data', [])
+            response_owned = self.session.get(url_owned, params=params)
+            response_owned.raise_for_status()
+            owned_data = response_owned.json().get('data', [])
+            for acc in owned_data:
+                if acc['id'] not in seen_ids:
+                    all_accounts.append(acc)
+                    seen_ids.add(acc['id'])
         except Exception as e:
-            print(f"❌ Error fetching ad accounts: {e}")
-            return []
+            print(f"❌ Error fetching owned ad accounts: {e}")
+
+        # 2. Fetch shared/client ad accounts
+        try:
+            url_client = f"{self.base_url}/{business_manager_id}/client_ad_accounts"
+            response_client = self.session.get(url_client, params=params)
+            response_client.raise_for_status()
+            client_data = response_client.json().get('data', [])
+            for acc in client_data:
+                if acc['id'] not in seen_ids:
+                    all_accounts.append(acc)
+                    seen_ids.add(acc['id'])
+        except Exception as e:
+            print(f"❌ Error fetching client ad accounts: {e}")
+            
+        return all_accounts
     
     def get_ad_insights(self, account_id: str, date_start: str, date_end: str, level: str = 'ad', progress_callback=None) -> List[Dict]:
         """Get detailed ad insights for a date range"""
