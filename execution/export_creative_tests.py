@@ -41,9 +41,15 @@ def parse_campaign_name(campaign_name: str):
 
 
 def extract_ad_name_from_campaign(campaign_name: str) -> str:
-    """Extracts the ad name from a campaign name. e.g. '... - LT801.30' -> 'LT801.30'"""
-    if not campaign_name:
-        return ""
+    """Extracts the ad name from a campaign name. e.g. '... - [LT801.30]' -> 'LT801.30'"""
+    if not campaign_name: return ""
+    
+    # Priority: Ad name exactly within brackets, e.g. [LT899.43]
+    import re
+    bracket_match = re.search(r'\[(LT\d+(?:\.\d+)?|TC\d+(?:\.\d+)?)\]', campaign_name, re.IGNORECASE)
+    if bracket_match:
+        return bracket_match.group(1).strip()
+        
     # Try the canonical ABO/CBO separator first
     match = re.search(r'(?:ABO|CBO)\s+\S+\s*-\s*(.+)$', campaign_name, re.IGNORECASE)
     if match:
