@@ -306,14 +306,14 @@ def fill_creative_tests(
             matched_infos = ad_to_campaign[search_term]
         else:
             best_key = ""
+            import re
+            pattern = r'(?<![a-zA-Z0-9_\.])' + re.escape(search_term) + r'(?![a-zA-Z0-9_\.])'
             for key in ad_to_campaign.keys():
                 match_valid = False
                 if key in search_term:
                     match_valid = True
-                elif key.startswith(search_term):
-                    next_char = key[len(search_term):len(search_term)+1]
-                    if not next_char.isalnum():
-                        match_valid = True
+                elif re.search(pattern, key):
+                    match_valid = True
                         
                 if match_valid and len(key) > len(best_key):
                     best_key = key
