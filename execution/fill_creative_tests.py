@@ -229,9 +229,24 @@ def fill_creative_tests(
         acc_raw = account_id.replace("act_", "")
         url = f"https://graph.facebook.com/v19.0/act_{acc_raw}/campaigns"
         params = {"access_token": token, "fields": "id,name", "limit": 500}
+        import time
         while url:
-            r = requests.get(url, params=params, timeout=30)
-            if r.status_code != 200: break
+            success = False
+            for retry in range(4):
+                r = requests.get(url, params=params, timeout=30)
+                if r.status_code == 200:
+                    success = True
+                    break
+                elif r.status_code == 429 or r.status_code >= 500:
+                    time.sleep(2 ** retry)
+                    continue
+                else:
+                    break
+            
+            if not success:
+                if progress_callback: progress_callback(f"⚠️ Erro/Rate Limit ao puxar contas do Facebook. Algumas campanhas foram ignoradas.")
+                break
+                
             data = r.json()
             page_data = data.get("data", [])
             if not page_data: break
@@ -290,10 +305,21 @@ def fill_creative_tests(
         if search_term in ad_to_campaign:
             matched_infos = ad_to_campaign[search_term]
         else:
-            for key, infos in ad_to_campaign.items():
-                if search_term in key or key in search_term:
-                    matched_infos = infos
-                    break
+            best_key = ""
+            for key in ad_to_campaign.keys():
+                match_valid = False
+                if key in search_term:
+                    match_valid = True
+                elif key.startswith(search_term):
+                    next_char = key[len(search_term):len(search_term)+1]
+                    if not next_char.isalnum():
+                        match_valid = True
+                        
+                if match_valid and len(key) > len(best_key):
+                    best_key = key
+                    
+            if best_key:
+                matched_infos = ad_to_campaign[best_key]
 
         if not matched_infos:
             not_found.append(str(ad_name_value))
@@ -320,13 +346,17 @@ def fill_creative_tests(
             
             best_fin = None
             max_imps = -1
+            max_spend = -1
             
-            # Check all matched campaigns and pick the one with most impressions
+            # Check all matched campaigns and pick the one with most impressions (or spend)
             for info in matched_infos:
                 fin = fetch_fb_insights_for_campaign(info["id"], row_date_start, date_end, token)
                 imps = fin.get("impressions", 0)
-                if imps > max_imps:
+                spend_fb = fin.get("spend", 0)
+                
+                if imps > max_imps or (imps == max_imps and spend_fb > max_spend):
                     max_imps = imps
+                    max_spend = spend_fb
                     best_fin = fin
                     
             if not best_fin:
