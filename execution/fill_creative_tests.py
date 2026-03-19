@@ -305,21 +305,31 @@ def fill_creative_tests(
         if search_term in ad_to_campaign:
             matched_infos = ad_to_campaign[search_term]
         else:
-            best_key = ""
             import re
-            pattern = r'(?<![a-zA-Z0-9_\.])' + re.escape(search_term) + r'(?![a-zA-Z0-9_\.])'
+            base_term = search_term.split('.')[0] if '.' in search_term else search_term
+            pattern_exact = r'(?<![a-zA-Z0-9_\.])' + re.escape(search_term) + r'(?![a-zA-Z0-9_\.])'
+            pattern_base = r'(?<![a-zA-Z0-9_\.])' + re.escape(base_term) + r'(?![a-zA-Z0-9_\.])'
+            
+            best_score = 0
+            matched_keys = []
+            
             for key in ad_to_campaign.keys():
-                match_valid = False
-                if key in search_term:
-                    match_valid = True
-                elif re.search(pattern, key):
-                    match_valid = True
-                        
-                if match_valid and len(key) > len(best_key):
-                    best_key = key
+                match_score = 0
+                if re.search(pattern_exact, key):
+                    match_score = 2
+                elif base_term != search_term and re.search(pattern_base, key):
+                    match_score = 1
                     
-            if best_key:
-                matched_infos = ad_to_campaign[best_key]
+                if match_score > 0:
+                    if match_score > best_score:
+                        best_score = match_score
+                        matched_keys = [key]  # Reset com a melhor prioridade
+                    elif match_score == best_score:
+                        matched_keys.append(key)
+                        
+            matched_infos = []
+            for mk in matched_keys:
+                matched_infos.extend(ad_to_campaign[mk])
 
         if not matched_infos:
             not_found.append(str(ad_name_value))
