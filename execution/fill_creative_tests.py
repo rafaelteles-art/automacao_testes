@@ -126,31 +126,26 @@ def fetch_fb_insights_for_campaign(c_id, since, until, fb_token):
     }
 
 def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
-    vendas = 0.0
-    cost = 0.0
-    roas = 0.0
     if not rt_token or not ad_name_lower:
         return {"vendas": 0, "cost": 0.0, "roas": 0.0}
     
     import time
-    page = 1
     
-    def internal_fetch(p_num):
+    def internal_fetch(p_num, group_name):
         for retry in range(4):
             try:
                 r = requests.get('https://api.redtrack.io/report', params={
                     'api_key': rt_token,
                     'date_from': since,
                     'date_to': until,
-                    'group': 'rt_ad',
+                    'group': group_name,
                     'limit': 2000,
                     'page': p_num
                 }, timeout=30)
-                
                 if r.status_code == 200:
                     return r.json(), True
                 elif r.status_code == 429 or r.status_code >= 500:
-                    time.sleep(2 ** retry) # Exponential backoff: 1s, 2s, 4s, 8s
+                    time.sleep(2 ** retry)
                     continue
                 else:
                     return [], False
@@ -159,50 +154,44 @@ def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
                 continue
         return [], False
 
-    # First Pass
-    while page <= 5:
-        rt_data, success = internal_fetch(page)
-        if not success or not rt_data: break
-        
-        for r_row in rt_data:
-            rt_ad = str(r_row.get('rt_ad', '')).strip().lower()
-            if not rt_ad: continue
+    def fetch_and_sum(group_name):
+        v = 0.0; c = 0.0; ro = 0.0
+        page = 1
+        while page <= 5:
+            rt_data, success = internal_fetch(page, group_name)
+            if not success or not rt_data: break
             
-            is_match = False
-            if rt_ad == ad_name_lower:
-                is_match = True
-            elif rt_ad == ad_name_lower.split(" - ")[0].split(" ")[0]:
-                is_match = True
-                
-            if is_match:
-                vendas += float(r_row.get('convtype2', 0))
-                cost += float(r_row.get('cost', 0))
-                roas_val = float(r_row.get('roas', 0))
-                if roas_val != 0: roas = roas_val
-        
-        if len(rt_data) < 2000: break
-        page += 1
-
-    # DOUBLE CHECK logic: if intermittent API drop caused 0 data, force a second pass after sleeping
-    if vendas == 0 and cost == 0:
-        time.sleep(3)
-        rt_data_dc, success_dc = internal_fetch(1)
-        if success_dc and rt_data_dc:
-            for r_row in rt_data_dc:
-                rt_ad = str(r_row.get('rt_ad', '')).strip().lower()
-                if not rt_ad: continue
+            for r_row in rt_data:
+                rt_val = str(r_row.get(group_name, '')).strip().lower()
+                if not rt_val: continue
                 
                 is_match = False
-                if rt_ad == ad_name_lower:
+                if rt_val == ad_name_lower:
                     is_match = True
-                elif rt_ad == ad_name_lower.split(" - ")[0].split(" ")[0]:
+                elif rt_val == ad_name_lower.split(" - ")[0].split(" ")[0]:
                     is_match = True
                     
                 if is_match:
-                    vendas += float(r_row.get('convtype2', 0))
-                    cost += float(r_row.get('cost', 0))
+                    v += float(r_row.get('convtype2', 0))
+                    c += float(r_row.get('cost', 0))
                     roas_val = float(r_row.get('roas', 0))
-                    if roas_val != 0: roas = roas_val
+                    if roas_val != 0: ro = roas_val
+            
+            if len(rt_data) < 2000: break
+            page += 1
+        return v, c, ro
+
+    # Try rt_ad first (default correct setup)
+    vendas, cost, roas = fetch_and_sum("rt_ad")
+    
+    # Fallback to sub4 if media buyer populated the wrong parameter (ex: LT1192)
+    if vendas == 0 and cost == 0:
+        vendas, cost, roas = fetch_and_sum("sub4")
+        
+    # Double check API glitch
+    if vendas == 0 and cost == 0:
+        time.sleep(3)
+        vendas, cost, roas = fetch_and_sum("rt_ad")
 
     return {"vendas": vendas, "cost": cost, "roas": roas}
 
