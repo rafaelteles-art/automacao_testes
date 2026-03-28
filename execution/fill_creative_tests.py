@@ -139,7 +139,7 @@ def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
                     'date_from': since,
                     'date_to': until,
                     'group': group_name,
-                    'limit': 2000,
+                    'limit': 1000,
                     'page': p_num
                 }, timeout=30)
                 if r.status_code == 200:
@@ -177,7 +177,7 @@ def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
                     roas_val = float(r_row.get('roas', 0))
                     if roas_val != 0: ro = roas_val
             
-            if len(rt_data) < 2000: break
+            if len(rt_data) < 1000: break
             page += 1
         return v, c, ro
 
