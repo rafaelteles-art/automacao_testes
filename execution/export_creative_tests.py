@@ -44,17 +44,28 @@ def extract_ad_name_from_campaign(campaign_name: str) -> str:
     """Extracts the ad name from a campaign name. e.g. '... - [LT801.30]' -> 'LT801.30'"""
     if not campaign_name: return ""
     
-    # Priority: Ad name exactly within brackets, e.g. [LT899.43]
+    # Priority 1: Ad name in brackets, e.g. [LT899.43]
     import re
     bracket_match = re.search(r'\[(LT\d+(?:\.\d+)?|TC\d+(?:\.\d+)?)\]', campaign_name, re.IGNORECASE)
     if bracket_match:
         return bracket_match.group(1).strip()
-        
-    # Try the canonical ABO/CBO separator first
+    
+    # Priority 2: Find LT/BT pattern after ABO/CBO section
+    lt_after_abo = re.search(r'(?:ABO|CBO)\b.*?-\s*((?:LT|BT)\d+(?:\.\d+)?)\s*(?:\s*-|$)', campaign_name, re.IGNORECASE)
+    if lt_after_abo:
+        return lt_after_abo.group(1).strip()
+    
+    # Priority 3: Fallback - find any standalone LT/BT pattern (last one in string)
+    all_lt = re.findall(r'\b((?:LT|BT)\d+(?:\.\d+)?)\b', campaign_name, re.IGNORECASE)
+    if all_lt:
+        return all_lt[-1].strip()
+    
+    # Priority 4: Original ABO/CBO parsing
     match = re.search(r'(?:ABO|CBO)\s+\S+\s*-\s*(.+)$', campaign_name, re.IGNORECASE)
     if match:
         return match.group(1).strip()
-    # Fallback: everything after the last ' - '
+    
+    # Priority 5: rsplit fallback
     parts = campaign_name.rsplit(' - ', 1)
     if len(parts) == 2:
         return parts[1].strip()
