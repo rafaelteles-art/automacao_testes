@@ -410,6 +410,15 @@ def fill_creative_tests(
                 
             cells_to_update.append(gspread.Cell(row=row_idx, col=12, value=round(cpa, 2)))
 
+            # Col M - Status auto-fill based on vendas and gasto
+            if vendas >= 3:
+                cells_to_update.append(gspread.Cell(row=row_idx, col=13, value="VALIDADO"))
+            elif vendas == 2 and rt_cost_brl > 800:
+                cells_to_update.append(gspread.Cell(row=row_idx, col=13, value="VALIDADO"))
+            elif vendas < 2 and rt_cost_brl >= 800:
+                cells_to_update.append(gspread.Cell(row=row_idx, col=13, value="DESCARTADO"))
+            # else: gasto < 800 → don't alter column M
+
             filled_metrics += 1
         else:
             skipped_rows += 1
