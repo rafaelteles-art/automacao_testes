@@ -58,9 +58,18 @@ with col2:
     def fetch_bms(token):
         bms = get_fb_api(token).get_business_managers()
         return bms if bms else None # Retorna None se falhar em vez de [] vazio para evitar cache infinito
-        
+
+    col_bm_refresh = st.columns([3, 1])
+    with col_bm_refresh[1]:
+        if st.button("🔄", help="Recarregar lista de BMs"):
+            fetch_bms.clear()
+            st.rerun()
+
     bm_list = fetch_bms(fb_token)
-    
+
+    if bm_list is not None:
+        st.caption(f"{len(bm_list)} BM(s) encontrado(s)")
+
     if bm_list is None:
          st.error("Token do Facebook inválido ou expirado. Cole um novo token no menu lateral.")
          bm_options = {}
