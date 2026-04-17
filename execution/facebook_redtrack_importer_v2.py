@@ -26,16 +26,23 @@ class FacebookAdsAPI:
         self.session.headers.update({'Authorization': f'Bearer {access_token}'})
     
     def get_business_managers(self) -> List[Dict]:
-        """Get all business managers accessible to this token"""
+        """Get all business managers accessible to this token (with pagination)"""
+        all_bms = []
         try:
             url = f"{self.base_url}/me/businesses"
-            params = {'fields': 'id,name'}
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            return response.json().get('data', [])
+            params = {'fields': 'id,name', 'limit': 100}
+            while url:
+                response = self.session.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                all_bms.extend(data.get('data', []))
+                # Follow pagination cursor
+                url = data.get('paging', {}).get('next')
+                params = None  # 'next' URL already includes all params
+            return all_bms
         except Exception as e:
             print(f"❌ Error fetching business managers: {e}")
-            return []
+            return all_bms
     
     def get_ad_accounts(self, business_manager_id: str) -> List[Dict]:
         """Get all ad accounts from a business manager (owned and shared/client)"""
