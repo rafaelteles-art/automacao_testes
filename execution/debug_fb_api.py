@@ -2,7 +2,7 @@ import requests
 import json
 
 def test():
-    FB_ACCESS_TOKEN = "EAAWDHozjODgBQ39udZCgOBiijBtiwgSqkCBi0M2aZCePs4elBUwbBQxPKX9jQMNPEDpAfaGIxPQbPaoEONkihbY1mV5op8YKuJtGTaaOS4jIbzE5ud8AejrFlGidPBZAoO1I8QpT6S2M19jHlHXSfUQifEzyt9ztZA5ZAwiijoRfpQndJT2cPFdxzrfN1raFSO3naKJdCMeExOu0oHPfc5KCvoZCuKZAjZAa9Tuz8fuEgR5iKctLZA8VbkVINo5o5ZBhqUWqsUcA1ZCxMuoMytAXSo88k2lVEayGT5uOwRCFAZDZD"
+    FB_ACCESS_TOKEN = "EAAWDHozjODgBRYSLNrJKwCXTvowH12ayUGzsp7bZBqbHZBGFrQcaZAXpFwgiq3byQ2cg6ZBHFZCLn8hCXZAN8ZB1BzjQZBbtEP8jgdGzcpdNiFfgXZCKtTzNVQZAAYclfzwEyLOfsL3eazEIe22X5PQnJ6qUSZCn266p1Oi0eEQ84yFMh7tvg6SblkNFlMgZAxlwXDji"
     account_id = "542987171356461" # Diana Vargas CA06 (selected previously)
     
     url = f"https://graph.facebook.com/v19.0/act_{account_id}/insights"

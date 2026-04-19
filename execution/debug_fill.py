@@ -7,7 +7,7 @@ import sys, os, requests
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from facebook_redtrack_importer_v2 import FacebookAdsAPI
 
-TOKEN = "EAAWDHozjODgBQZCaUO1BmIRhlor7pT3l5NnLt9OE3sD7DlY0XCyELNOLw5Fm73EYJplWcFGwN52V40RPyK1RhptKtkoZCD7QJ7m982DxGR1GxTCAcXTb0KzXsy73eQJ7JApVjmkyyf2S9d6hgZB10dX8wyUV50arh1WuM0h1NMzlZCTrQCRKlyMZAGlzMpBt0cpzyHZBpcslNUozDmUZAuEbBYtldb5eQQe5lGVvYD8Dlqw0FuSQRhKjZB3sR0skPHklUg4Rnf5VSAgJkhriQ8xdjh6YkmKp8lzkCK28mAZDZD"
+TOKEN = "EAAWDHozjODgBRYSLNrJKwCXTvowH12ayUGzsp7bZBqbHZBGFrQcaZAXpFwgiq3byQ2cg6ZBHFZCLn8hCXZAN8ZB1BzjQZBbtEP8jgdGzcpdNiFfgXZCKtTzNVQZAAYclfzwEyLOfsL3eazEIe22X5PQnJ6qUSZCn266p1Oi0eEQ84yFMh7tvg6SblkNFlMgZAxlwXDji"
 BASE_URL = "https://graph.facebook.com/v19.0"
 
 # ── 1. Get BMs
