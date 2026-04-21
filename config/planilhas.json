@@ -1,0 +1,27 @@
+{
+  "planilhas": [
+    {
+      "id": "5cec1f31-d714-45b0-a2a3-540d821d77c8",
+      "nome": "DOSSIE LOTTO V7",
+      "g_url": "https://docs.google.com/spreadsheets/d/1Su7gJxrVDhgkuEkmsN4sSjMyXEveIkqkYy98fMgR6P4/edit",
+      "aba": "Cópia de TRÁFEGO ABRIL/26",
+      "campaign_ids": [
+        "691250b7c3f17e8305b9b82a",
+        "69e7bbcf8f7c1da5793c3e3b",
+        "6882d34f969fe3c7bde27c70"
+      ],
+      "metric_rows": {
+        "2": "cost",
+        "4": "clicks",
+        "5": "lp_views",
+        "11": "convtype1",
+        "12": "convtype2",
+        "13": "convtype3",
+        "14": "convtype4",
+        "15": "convtype5",
+        "16": "convtype6",
+        "27": "total_revenue"
+      }
+    }
+  ]
+}

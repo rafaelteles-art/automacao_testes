@@ -23,3 +23,7 @@ venv/
 ~$*
 *.csv
 dashboard.html
+
+# Claude memory compiler (separate repo cloned as subdirectory)
+.claude-memory-compiler/
+.claude/settings.local.json

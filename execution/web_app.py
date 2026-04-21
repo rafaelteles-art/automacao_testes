@@ -255,7 +255,12 @@ import json
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     try:
-        if "gcp_service_account" in st.secrets:
+        has_secret = False
+        try:
+            has_secret = "gcp_service_account" in st.secrets
+        except Exception:
+            has_secret = False
+        if has_secret:
             # Load from secrets (assuming it's a dict or JSON string)
             secret_info = st.secrets["gcp_service_account"]
             if isinstance(secret_info, str):
@@ -339,3 +344,203 @@ if g_url:
                             st.write("`, `".join(result['not_found']))
     except Exception as e:
         st.error(f"❌ Não foi possível acessar a planilha. Verifique o link ou se o e-mail do robô foi adicionado como Editor no Google Sheets! ({e})")
+
+# =============================================================================
+# Preencher por Campanhas RedTrack (datas no cabeçalho → soma das campanhas)
+# =============================================================================
+st.markdown("---")
+st.markdown("## 📅 Preencher por Campanhas RedTrack")
+st.caption("Cada planilha é associada a uma ou mais campanhas. As colunas que tiverem uma data na primeira linha são preenchidas com a soma das métricas dessas campanhas para aquela data.")
+
+import planilha_config_store as cfg_store
+from facebook_redtrack_importer_v2 import RedTrackAPI
+from fill_planilha_by_dates import (
+    SUPPORTED_METRICS,
+    build_preview,
+    fill_sheet,
+)
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_rt_campaigns(token):
+    rt = RedTrackAPI(token)
+    return rt.list_campaigns()
+
+tab_cfg, tab_run = st.tabs(["⚙️ Configurar Planilhas", "▶️ Preencher Planilha"])
+
+with tab_cfg:
+    st.markdown("### Planilhas cadastradas")
+
+    rt_campaigns = fetch_rt_campaigns(rt_token) if rt_token else []
+    if not rt_campaigns:
+        st.warning("Não consegui listar campanhas do RedTrack. Verifique a chave de API no menu lateral.")
+    else:
+        st.caption(f"{len(rt_campaigns)} campanhas RedTrack disponíveis para associação.")
+    campaign_label = {c["id"]: f"{c['title']} ({c['id']})" for c in rt_campaigns}
+    label_to_id = {v: k for k, v in campaign_label.items()}
+
+    planilhas = cfg_store.load_all()
+    if not planilhas:
+        st.info("Nenhuma planilha cadastrada ainda. Use o formulário abaixo.")
+    for p in planilhas:
+        with st.expander(f"📄 {p['nome']}  —  aba: {p['aba']}  —  {len(p.get('campaign_ids', []))} campanha(s)"):
+            st.write(f"**URL:** {p['g_url']}")
+            st.write("**Campanhas associadas:**")
+            for cid in p.get("campaign_ids", []):
+                st.write(f"- {campaign_label.get(cid, cid)}")
+            mr = p.get("metric_rows") or {}
+            if mr:
+                st.write("**Mapeamento linha → métrica:**")
+                st.json(mr)
+            else:
+                st.caption("Mapeamento linha→métrica ainda não configurado (sem isso o preenchimento não escreve nada).")
+
+            col_e, col_d = st.columns([1, 1])
+            with col_e:
+                if st.button("✏️ Editar", key=f"edit_{p['id']}"):
+                    st.session_state["editing_planilha_id"] = p["id"]
+                    st.rerun()
+            with col_d:
+                if st.button("🗑️ Excluir", key=f"del_{p['id']}"):
+                    cfg_store.delete(p["id"])
+                    st.success("Planilha removida.")
+                    st.rerun()
+
+    st.markdown("---")
+    editing_id = st.session_state.get("editing_planilha_id")
+    editing = cfg_store.get(editing_id) if editing_id else None
+    st.markdown("### " + ("Editar planilha" if editing else "Adicionar planilha"))
+
+    with st.form("planilha_form", clear_on_submit=False):
+        nome_v = st.text_input("Nome (apelido livre)", value=editing.get("nome") if editing else "")
+        url_v = st.text_input("Link da Planilha do Google", value=editing.get("g_url") if editing else "")
+        aba_v = st.text_input("Nome da aba", value=editing.get("aba") if editing else "")
+
+        default_labels = []
+        if editing:
+            default_labels = [campaign_label[cid] for cid in editing.get("campaign_ids", []) if cid in campaign_label]
+        camp_v = st.multiselect(
+            "Campanhas RedTrack associadas",
+            options=list(label_to_id.keys()),
+            default=default_labels,
+        )
+
+        st.markdown("**Mapeamento linha → métrica** (opcional por enquanto)")
+        st.caption("Defina, para esta planilha, qual métrica vai em cada linha. Ex.: linha 2 = cost, linha 3 = convtype2.")
+        existing_mr = editing.get("metric_rows", {}) if editing else {}
+        mr_text = st.text_area(
+            "Uma entrada por linha no formato `linha=metrica`",
+            value="\n".join(f"{r}={m}" for r, m in existing_mr.items()),
+            placeholder="2=cost\n3=convtype2\n4=roas",
+            help=f"Métricas disponíveis: {', '.join(SUPPORTED_METRICS)}",
+        )
+
+        col_s, col_c = st.columns([1, 1])
+        with col_s:
+            submitted = st.form_submit_button("💾 Salvar", type="primary")
+        with col_c:
+            cancelled = st.form_submit_button("Cancelar")
+
+        if cancelled and editing_id:
+            del st.session_state["editing_planilha_id"]
+            st.rerun()
+
+        if submitted:
+            metric_rows = {}
+            for line in mr_text.splitlines():
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                row_part, metric_part = line.split("=", 1)
+                row_part = row_part.strip()
+                metric_part = metric_part.strip()
+                if row_part.isdigit() and metric_part in SUPPORTED_METRICS:
+                    metric_rows[row_part] = metric_part
+
+            if not nome_v or not url_v or not aba_v:
+                st.error("Nome, link e aba são obrigatórios.")
+            else:
+                cfg_store.upsert(
+                    nome=nome_v,
+                    g_url=url_v,
+                    aba=aba_v,
+                    campaign_ids=[label_to_id[lbl] for lbl in camp_v],
+                    metric_rows=metric_rows,
+                    planilha_id=editing_id,
+                )
+                if editing_id:
+                    del st.session_state["editing_planilha_id"]
+                st.success("Planilha salva.")
+                st.rerun()
+
+with tab_run:
+    planilhas = cfg_store.load_all()
+    if not planilhas:
+        st.info("Cadastre uma planilha primeiro na aba **Configurar Planilhas**.")
+    else:
+        nome_to_id = {f"{p['nome']} — {p['aba']}": p["id"] for p in planilhas}
+        chosen_label = st.selectbox("Planilha", list(nome_to_id.keys()))
+        chosen_id = nome_to_id[chosen_label]
+        chosen = cfg_store.get(chosen_id)
+
+        st.write(f"**Campanhas:** {len(chosen.get('campaign_ids', []))}  |  **Aba:** `{chosen['aba']}`")
+        if not chosen.get("metric_rows"):
+            st.warning("Esta planilha ainda não tem mapeamento linha→métrica. O preview será gerado, mas nenhuma célula será escrita até você configurar o mapeamento.")
+
+        st.markdown("**Filtrar range de datas** (processa só colunas cuja data da linha 1 cair no intervalo)")
+        use_range = st.checkbox("Aplicar filtro de datas", value=False, key="use_date_range")
+        filter_start = filter_end = None
+        if use_range:
+            col_ds, col_de = st.columns([1, 1])
+            with col_ds:
+                filter_start = st.date_input("Data inicial", datetime.now().date() - timedelta(days=7), key="range_start")
+            with col_de:
+                filter_end = st.date_input("Data final", datetime.now().date(), key="range_end")
+            if filter_start and filter_end and filter_start > filter_end:
+                st.error("A data inicial deve ser menor ou igual à final.")
+
+        col_p, col_f = st.columns([1, 1])
+        run_preview = col_p.button("🔎 Pré-visualizar (sem gravar)")
+        run_fill = col_f.button("✍️ Preencher na planilha", type="primary")
+
+        if run_preview or run_fill:
+            with st.status("Processando...", expanded=True) as s:
+                progress_box = st.empty()
+                def _cb(msg):
+                    progress_box.write(f"⏳ {msg}")
+                try:
+                    if run_fill:
+                        result = fill_sheet(
+                            chosen, rt_token, gc, progress=_cb,
+                            filter_start=filter_start, filter_end=filter_end,
+                        )
+                        s.update(label="Preenchimento concluído ✅", state="complete", expanded=False)
+                    else:
+                        preview = build_preview(
+                            chosen, rt_token, gc, progress=_cb,
+                            filter_start=filter_start, filter_end=filter_end,
+                        )
+                        result = {"updates": 0, "preview": preview, "skipped_dates": [], "note": "preview only"}
+                        s.update(label="Preview gerado ✅", state="complete", expanded=False)
+                except Exception as e:
+                    import traceback
+                    s.update(label="Erro", state="error", expanded=True)
+                    st.error(f"❌ {e}\n\n{traceback.format_exc()}")
+                    result = None
+
+            if result:
+                preview = result["preview"]
+                date_cols = preview["date_columns"]
+                if not date_cols:
+                    st.warning("Nenhuma data foi detectada na linha 1 da aba selecionada.")
+                else:
+                    st.success(f"{len(date_cols)} coluna(s) de data detectada(s) entre {preview['range'][0]} e {preview['range'][1]}.")
+                    if result.get("updates"):
+                        st.info(f"✅ {result['updates']} célula(s) gravada(s).")
+                    if result.get("skipped_dates"):
+                        st.caption(f"Datas sem dados no RedTrack: {', '.join(result['skipped_dates'])}")
+
+                    rows_data = []
+                    for col_idx, day in date_cols:
+                        bucket = preview["totals_by_date"].get(day, {})
+                        rows_data.append({"col": col_idx, "data": day, **{m: bucket.get(m, 0) for m in SUPPORTED_METRICS}})
+                    st.dataframe(pd.DataFrame(rows_data), use_container_width=True)

@@ -174,6 +174,64 @@ class RedTrackAPI:
             print(f"❌ Error fetching campaigns: {e}")
             return []
 
+    def list_campaigns(self) -> List[Dict]:
+        """List all campaigns in the RedTrack account (id + title + status).
+
+        RedTrack /campaigns (no date filter) returns a JSON array of the full
+        campaign catalog. We strip it down to the fields the UI needs.
+        """
+        all_items: List[Dict] = []
+        try:
+            url = f"{self.base_url}/campaigns"
+            params = {'api_key': self.api_key, 'page': 1, 'per': 500}
+            while True:
+                response = requests.get(url, params=params, timeout=30)
+                response.raise_for_status()
+                payload = response.json()
+                # API may return either a plain list or {items: [...]}
+                items = payload if isinstance(payload, list) else payload.get('items', [])
+                if not items:
+                    break
+                for it in items:
+                    all_items.append({
+                        'id': it.get('id'),
+                        'title': it.get('title') or it.get('name') or it.get('id'),
+                        'status': it.get('status'),
+                    })
+                if len(items) < params['per']:
+                    break
+                params['page'] += 1
+            return all_items
+        except Exception as e:
+            print(f"❌ Error listing campaigns: {e}")
+            return all_items
+
+    def daily_report_for_campaign(self, campaign_id: str, date_start: str, date_end: str) -> List[Dict]:
+        """Fetch daily-grouped /report rows for a single campaign id.
+
+        Uses group=campaign,date because /report's ?campaign= filter param is
+        ignored — the server returns account-wide totals. We filter client-side
+        by campaign_id. Returns [{date, cost, convtype*, ...}, ...] for this
+        single campaign, one row per day in the range.
+        """
+        try:
+            url = f"{self.base_url}/report"
+            params = {
+                'api_key': self.api_key,
+                'date_from': date_start,
+                'date_to': date_end,
+                'group': 'campaign,date',
+                'limit': 5000,
+            }
+            response = requests.get(url, params=params, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            rows = data if isinstance(data, list) else data.get('items', [])
+            return [r for r in rows if r.get('campaign_id') == campaign_id]
+        except Exception as e:
+            print(f"❌ Error fetching daily report for campaign {campaign_id}: {e}")
+            return []
+
 
 class ExcelManager:
     """Excel file management"""
