@@ -30,6 +30,11 @@ rt_token = st.sidebar.text_input("Chave de API RedTrack", type="password")
 if not rt_token:
     rt_token = "wB7qY69R0KVU9tl4TBaQ"
 
+vturb_token = st.sidebar.text_input("Chave de API VTurb", type="password")
+
+if not vturb_token:
+    vturb_token = "62a36884887710e04f6ee66cde9ee9cebeef8efe6c50f25aa07437cb0111e0d6"
+
 st.sidebar.markdown("---")
 
 @st.cache_resource
@@ -353,7 +358,9 @@ st.markdown("## 📅 Preencher por Campanhas RedTrack")
 st.caption("Cada planilha é associada a uma ou mais campanhas. As colunas que tiverem uma data na primeira linha são preenchidas com a soma das métricas dessas campanhas para aquela data.")
 
 import planilha_config_store as cfg_store
+import label_map_store
 from facebook_redtrack_importer_v2 import RedTrackAPI
+from vturb_api import VTurbAPI
 from fill_planilha_by_dates import (
     SUPPORTED_METRICS,
     build_preview,
@@ -364,6 +371,16 @@ from fill_planilha_by_dates import (
 def fetch_rt_campaigns(token):
     rt = RedTrackAPI(token)
     return rt.list_campaigns()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_vturb_players(token):
+    if not token:
+        return []
+    try:
+        return VTurbAPI(token).list_players()
+    except Exception:
+        return []
 
 tab_cfg, tab_run = st.tabs(["⚙️ Configurar Planilhas", "▶️ Preencher Planilha"])
 
@@ -378,21 +395,32 @@ with tab_cfg:
     campaign_label = {c["id"]: f"{c['title']} ({c['id']})" for c in rt_campaigns}
     label_to_id = {v: k for k, v in campaign_label.items()}
 
+    vturb_players = fetch_vturb_players(vturb_token) if vturb_token else []
+    if vturb_players:
+        st.caption(f"{len(vturb_players)} players VTurb disponíveis para associação (A/B test = N players somados).")
+    else:
+        st.caption("Nenhum player VTurb disponível (verifique a chave de API VTurb no menu lateral).")
+    vturb_label = {p["id"]: f"{p.get('name', p['id'])} ({p['id']})" for p in vturb_players}
+    vturb_label_to_id = {v: k for k, v in vturb_label.items()}
+
     planilhas = cfg_store.load_all()
     if not planilhas:
         st.info("Nenhuma planilha cadastrada ainda. Use o formulário abaixo.")
     for p in planilhas:
-        with st.expander(f"📄 {p['nome']}  —  aba: {p['aba']}  —  {len(p.get('campaign_ids', []))} campanha(s)"):
+        n_vturb = len(p.get("vturb_player_ids", []) or [])
+        header = f"📄 {p['nome']}  —  aba: {p['aba']}  —  {len(p.get('campaign_ids', []))} campanha(s)"
+        if n_vturb:
+            header += f"  —  {n_vturb} player(s) VTurb"
+        with st.expander(header):
             st.write(f"**URL:** {p['g_url']}")
             st.write("**Campanhas associadas:**")
             for cid in p.get("campaign_ids", []):
                 st.write(f"- {campaign_label.get(cid, cid)}")
-            mr = p.get("metric_rows") or {}
-            if mr:
-                st.write("**Mapeamento linha → métrica:**")
-                st.json(mr)
-            else:
-                st.caption("Mapeamento linha→métrica ainda não configurado (sem isso o preenchimento não escreve nada).")
+            if p.get("vturb_player_ids"):
+                st.write("**Players VTurb (A/B test):**")
+                for pid in p["vturb_player_ids"]:
+                    st.write(f"- {vturb_label.get(pid, pid)}")
+            st.caption("Linhas desta planilha serão resolvidas pela coluna A no momento do preenchimento (dicionário global abaixo).")
 
             col_e, col_d = st.columns([1, 1])
             with col_e:
@@ -424,15 +452,17 @@ with tab_cfg:
             default=default_labels,
         )
 
-        st.markdown("**Mapeamento linha → métrica** (opcional por enquanto)")
-        st.caption("Defina, para esta planilha, qual métrica vai em cada linha. Ex.: linha 2 = cost, linha 3 = convtype2.")
-        existing_mr = editing.get("metric_rows", {}) if editing else {}
-        mr_text = st.text_area(
-            "Uma entrada por linha no formato `linha=metrica`",
-            value="\n".join(f"{r}={m}" for r, m in existing_mr.items()),
-            placeholder="2=cost\n3=convtype2\n4=roas",
-            help=f"Métricas disponíveis: {', '.join(SUPPORTED_METRICS)}",
+        default_vturb_labels = []
+        if editing:
+            default_vturb_labels = [vturb_label[pid] for pid in editing.get("vturb_player_ids", []) if pid in vturb_label]
+        vturb_v = st.multiselect(
+            "Players VTurb (A/B test — métricas somadas entre variantes)",
+            options=list(vturb_label_to_id.keys()),
+            default=default_vturb_labels,
+            help="Selecione 1 ou mais players. Para A/B test, marque todos os variantes — views, plays, pitch etc. serão somados.",
         )
+
+        st.caption("ℹ️ O preenchimento agora identifica a linha pelo valor da **coluna A** (ex. 'GASTO FACEBOOK'). Edite o dicionário global abaixo para controlar label → métrica.")
 
         col_s, col_c = st.columns([1, 1])
         with col_s:
@@ -445,17 +475,6 @@ with tab_cfg:
             st.rerun()
 
         if submitted:
-            metric_rows = {}
-            for line in mr_text.splitlines():
-                line = line.strip()
-                if not line or "=" not in line:
-                    continue
-                row_part, metric_part = line.split("=", 1)
-                row_part = row_part.strip()
-                metric_part = metric_part.strip()
-                if row_part.isdigit() and metric_part in SUPPORTED_METRICS:
-                    metric_rows[row_part] = metric_part
-
             if not nome_v or not url_v or not aba_v:
                 st.error("Nome, link e aba são obrigatórios.")
             else:
@@ -464,12 +483,60 @@ with tab_cfg:
                     g_url=url_v,
                     aba=aba_v,
                     campaign_ids=[label_to_id[lbl] for lbl in camp_v],
-                    metric_rows=metric_rows,
+                    metric_rows=editing.get("metric_rows") if editing else {},
                     planilha_id=editing_id,
+                    vturb_player_ids=[vturb_label_to_id[lbl] for lbl in vturb_v],
                 )
                 if editing_id:
                     del st.session_state["editing_planilha_id"]
                 st.success("Planilha salva.")
+                st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🗂️ Dicionário global Label → Métrica")
+    st.caption(
+        "Mapeia o texto da **coluna A** de cada planilha → métrica que deve ir naquela linha. "
+        "Normalização: maiúsculas, sem acento, espaços colapsados. Vale para todas as planilhas."
+    )
+
+    labels_map = label_map_store.load()
+    col_label_tbl, col_label_edit = st.columns([2, 1])
+
+    with col_label_tbl:
+        if labels_map:
+            st.dataframe(
+                pd.DataFrame(
+                    [{"Label (col. A normalizada)": k, "Métrica": v} for k, v in sorted(labels_map.items())]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("Dicionário vazio. Adicione entradas ao lado.")
+
+    with col_label_edit:
+        with st.form("label_map_form", clear_on_submit=True):
+            new_label = st.text_input("Label (como aparece na coluna A)", placeholder="GASTO FACEBOOK")
+            new_metric = st.selectbox(
+                "Métrica",
+                options=[""] + sorted(SUPPORTED_METRICS),
+                help="Métricas RedTrack + VTurb disponíveis.",
+            )
+            add_btn = st.form_submit_button("➕ Adicionar / Atualizar", type="primary")
+            if add_btn and new_label and new_metric:
+                label_map_store.upsert_one(new_label, new_metric)
+                st.success(f"Salvo: `{label_map_store.normalize_label(new_label)}` → `{new_metric}`")
+                st.rerun()
+
+        if labels_map:
+            to_remove = st.selectbox(
+                "Remover entrada",
+                options=[""] + sorted(labels_map.keys()),
+                key="label_map_remove",
+            )
+            if st.button("🗑️ Remover", disabled=not to_remove):
+                label_map_store.delete_one(to_remove)
+                st.success(f"Removido: `{to_remove}`")
                 st.rerun()
 
 with tab_run:
@@ -482,10 +549,11 @@ with tab_run:
         chosen_id = nome_to_id[chosen_label]
         chosen = cfg_store.get(chosen_id)
 
-        st.write(f"**Campanhas:** {len(chosen.get('campaign_ids', []))}  |  **Aba:** `{chosen['aba']}`")
-        if not chosen.get("metric_rows"):
-            st.warning("Esta planilha ainda não tem mapeamento linha→métrica. O preview será gerado, mas nenhuma célula será escrita até você configurar o mapeamento.")
-
+        st.write(
+            f"**Campanhas:** {len(chosen.get('campaign_ids', []))}  |  "
+            f"**Players VTurb:** {len(chosen.get('vturb_player_ids', []) or [])}  |  "
+            f"**Aba:** `{chosen['aba']}`"
+        )
         st.markdown("**Filtrar range de datas** (processa só colunas cuja data da linha 1 cair no intervalo)")
         use_range = st.checkbox("Aplicar filtro de datas", value=False, key="use_date_range")
         filter_start = filter_end = None
@@ -512,12 +580,14 @@ with tab_run:
                         result = fill_sheet(
                             chosen, rt_token, gc, progress=_cb,
                             filter_start=filter_start, filter_end=filter_end,
+                            vturb_token=vturb_token,
                         )
                         s.update(label="Preenchimento concluído ✅", state="complete", expanded=False)
                     else:
                         preview = build_preview(
                             chosen, rt_token, gc, progress=_cb,
                             filter_start=filter_start, filter_end=filter_end,
+                            vturb_token=vturb_token,
                         )
                         result = {"updates": 0, "preview": preview, "skipped_dates": [], "note": "preview only"}
                         s.update(label="Preview gerado ✅", state="complete", expanded=False)
@@ -534,6 +604,14 @@ with tab_run:
                     st.warning("Nenhuma data foi detectada na linha 1 da aba selecionada.")
                 else:
                     st.success(f"{len(date_cols)} coluna(s) de data detectada(s) entre {preview['range'][0]} e {preview['range'][1]}.")
+                    resolved = preview.get("resolved_rows") or {}
+                    if resolved:
+                        st.caption(
+                            f"🧩 {len(resolved)} linha(s) resolvida(s) via coluna A: "
+                            + ", ".join(f"L{r}→{m}" for r, m in sorted(resolved.items()))
+                        )
+                    else:
+                        st.warning("Nenhuma linha bateu com o dicionário global. Edite o dicionário na aba **Configurar Planilhas**.")
                     if result.get("updates"):
                         st.info(f"✅ {result['updates']} célula(s) gravada(s).")
                     if result.get("skipped_dates"):

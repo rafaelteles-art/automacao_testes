@@ -27,6 +27,8 @@ import gspread
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from facebook_redtrack_importer_v2 import RedTrackAPI
+from vturb_api import VTURB_METRIC_FIELDS, VTurbAPI
+import label_map_store
 
 
 # Metrics we expose in the UI. Keep the keys aligned with RedTrack /report
@@ -85,6 +87,9 @@ SUPPORTED_METRICS: List[str] = [
     "epv",
     *_CONV_TYPES,
     *_REVENUE_TYPES,
+    # VTurb (vide vturb_api.VTURB_METRIC_FIELDS). Somáveis entre variantes de
+    # A/B test, exceto as _rate (recomputadas via numerador/denominador).
+    *VTURB_METRIC_FIELDS.keys(),
 ]
 
 
@@ -134,10 +139,12 @@ def aggregate_metrics_by_date(
     date_start: str,
     date_end: str,
     progress: Optional[Callable[[str], None]] = None,
+    vturb_api: Optional[VTurbAPI] = None,
+    vturb_player_ids: Optional[List[str]] = None,
 ) -> Dict[str, Dict[str, float]]:
-    """Sum each supported metric per date across all campaigns.
+    """Sum each supported metric per date across campaigns and VTurb players.
 
-    Returns: {"2026-04-15": {"cost": 123.4, "convtype2": 5, ...}, ...}
+    Returns: {"2026-04-15": {"cost": 123.4, "convtype2": 5, "vturb_viewed": 80, ...}, ...}
     """
     totals: Dict[str, Dict[str, float]] = {}
     for cid in campaign_ids:
@@ -155,6 +162,51 @@ def aggregate_metrics_by_date(
                     bucket[m] += float(row.get(m, 0) or 0)
                 except (TypeError, ValueError):
                     continue
+
+    if vturb_api and vturb_player_ids:
+        # Accumulators for engagement_rate weighted average (by total_viewed).
+        engagement_num: Dict[str, float] = {}
+        engagement_den: Dict[str, float] = {}
+        for pid in vturb_player_ids:
+            if progress:
+                progress(f"Buscando VTurb /sessions/stats_by_day do player {pid}...")
+            rows = vturb_api.daily_stats_for_player(pid, date_start, date_end)
+            for row in rows:
+                day_raw = row.get("date_key") or row.get("day")
+                if not day_raw:
+                    continue
+                day = str(day_raw)[:10]
+                bucket = totals.setdefault(day, {m: 0.0 for m in SUPPORTED_METRICS})
+                # Sum raw counts; ratios get re-derived after.
+                for metric_key, raw_field in VTURB_METRIC_FIELDS.items():
+                    if metric_key.endswith("_rate"):
+                        continue
+                    try:
+                        bucket[metric_key] += float(row.get(raw_field, 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                # Weighted engagement_rate accumulators.
+                try:
+                    viewed = float(row.get("total_viewed", 0) or 0)
+                    er = float(row.get("engagement_rate", 0) or 0)
+                    engagement_num[day] = engagement_num.get(day, 0.0) + er * viewed
+                    engagement_den[day] = engagement_den.get(day, 0.0) + viewed
+                except (TypeError, ValueError):
+                    pass
+
+        # Derive ratios from summed counts (more correct than averaging rates).
+        #   play_rate = total_started / total_viewed * 100
+        #   over_pitch_rate = total_over_pitch / total_started * 100
+        #   engagement_rate = weighted avg by total_viewed
+        for day, bucket in totals.items():
+            viewed = bucket.get("vturb_viewed", 0) or 0
+            started = bucket.get("vturb_started", 0) or 0
+            over_pitch = bucket.get("vturb_over_pitch", 0) or 0
+            bucket["vturb_play_rate"] = (started / viewed * 100) if viewed else 0.0
+            bucket["vturb_over_pitch_rate"] = (over_pitch / started * 100) if started else 0.0
+            den = engagement_den.get(day, 0.0)
+            bucket["vturb_engagement_rate"] = (engagement_num.get(day, 0.0) / den) if den else 0.0
+
     return totals
 
 
@@ -165,18 +217,22 @@ def build_preview(
     progress: Optional[Callable[[str], None]] = None,
     filter_start: Optional[date] = None,
     filter_end: Optional[date] = None,
+    vturb_token: Optional[str] = None,
 ) -> Dict:
     """Read the sheet, detect date columns, fetch+aggregate metrics.
 
     If `filter_start`/`filter_end` are provided, only date-columns whose header
     date falls inside [start, end] are processed. Returns a dict with:
-    date_columns, totals_by_date, campaign_ids, range. Does NOT write.
+    date_columns, totals_by_date, campaign_ids, vturb_player_ids, range.
+    Does NOT write.
     """
     if progress:
         progress("Abrindo planilha...")
     sh = gc.open_by_url(config["g_url"])
     ws = sh.worksheet(config["aba"])
     header_row = ws.row_values(1)
+    col_a = ws.col_values(1)
+    resolved_rows = label_map_store.resolve_rows(col_a)
     date_cols = detect_date_columns(header_row)
     if filter_start:
         date_cols = [(c, d) for c, d in date_cols if d >= filter_start]
@@ -187,6 +243,8 @@ def build_preview(
             "date_columns": [],
             "totals_by_date": {},
             "campaign_ids": config.get("campaign_ids", []),
+            "vturb_player_ids": config.get("vturb_player_ids", []),
+            "resolved_rows": resolved_rows,
             "range": None,
         }
 
@@ -195,17 +253,24 @@ def build_preview(
     date_end = max(dates_only).strftime("%Y-%m-%d")
 
     rt_api = RedTrackAPI(rt_token)
+    vturb_player_ids = config.get("vturb_player_ids", []) or []
+    vturb_api = VTurbAPI(vturb_token) if (vturb_token and vturb_player_ids) else None
+
     totals = aggregate_metrics_by_date(
         rt_api,
         config.get("campaign_ids", []),
         date_start,
         date_end,
         progress=progress,
+        vturb_api=vturb_api,
+        vturb_player_ids=vturb_player_ids,
     )
     return {
         "date_columns": [(c, d.strftime("%Y-%m-%d")) for c, d in date_cols],
         "totals_by_date": totals,
         "campaign_ids": config.get("campaign_ids", []),
+        "vturb_player_ids": vturb_player_ids,
+        "resolved_rows": resolved_rows,
         "range": (date_start, date_end),
     }
 
@@ -217,6 +282,7 @@ def fill_sheet(
     progress: Optional[Callable[[str], None]] = None,
     filter_start: Optional[date] = None,
     filter_end: Optional[date] = None,
+    vturb_token: Optional[str] = None,
 ) -> Dict:
     """Apply the metric_rows mapping to each detected date column.
 
@@ -225,11 +291,12 @@ def fill_sheet(
     preview = build_preview(
         config, rt_token, gc, progress=progress,
         filter_start=filter_start, filter_end=filter_end,
+        vturb_token=vturb_token,
     )
-    metric_rows: Dict[str, str] = config.get("metric_rows") or {}
-    if not metric_rows:
+    resolved_rows: Dict[int, str] = preview.get("resolved_rows") or {}
+    if not resolved_rows:
         return {"updates": 0, "preview": preview, "skipped_dates": [],
-                "note": "metric_rows vazio — nada foi escrito."}
+                "note": "Nenhuma linha da coluna A bateu com o dicionário global de labels — nada foi escrito."}
 
     sh = gc.open_by_url(config["g_url"])
     ws = sh.worksheet(config["aba"])
@@ -241,11 +308,7 @@ def fill_sheet(
         if not bucket:
             skipped.append(day)
             continue
-        for row_str, metric in metric_rows.items():
-            try:
-                row_idx = int(row_str)
-            except (TypeError, ValueError):
-                continue
+        for row_idx, metric in resolved_rows.items():
             value = bucket.get(metric, 0.0)
             cells.append(gspread.Cell(row=row_idx, col=col_idx, value=round(float(value), 4)))
 

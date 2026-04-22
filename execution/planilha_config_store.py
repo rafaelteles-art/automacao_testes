@@ -56,6 +56,7 @@ def upsert(
     campaign_ids: List[str],
     metric_rows: Optional[Dict[str, str]] = None,
     planilha_id: Optional[str] = None,
+    vturb_player_ids: Optional[List[str]] = None,
 ) -> Dict:
     """Create or update a planilha entry. Returns the stored dict."""
     items = load_all()
@@ -66,6 +67,7 @@ def upsert(
         "aba": aba.strip(),
         "campaign_ids": [c for c in campaign_ids if c],
         "metric_rows": metric_rows or {},
+        "vturb_player_ids": [p for p in (vturb_player_ids or []) if p],
     }
     for idx, existing in enumerate(items):
         if existing.get("id") == record["id"]:

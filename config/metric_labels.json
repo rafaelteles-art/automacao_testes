@@ -1,0 +1,18 @@
+{
+  "labels": {
+    "GASTO FACEBOOK": "cost",
+    "CLIQUES": "clicks",
+    "VISUALIZACAO PAGINA": "lp_views",
+    "IC": "convtype1",
+    "COMPRAS FRONT": "convtype2",
+    "COMPRAS UPSELL 1": "convtype3",
+    "COMPRAS UPSELL 2": "convtype4",
+    "COMPRAS UPSELL 3": "convtype5",
+    "COMPRAS UPSELL 4": "convtype6",
+    "FATURAMENTO TRAFEGO FACEBOOK": "total_revenue",
+    "VIEWS UNICOS": "vturb_viewed_device_uniq",
+    "PLAYS UNICOS": "vturb_started_device_uniq",
+    "PLAY RATE": "vturb_play_rate",
+    "CONECT RATE VTURB": "vturb_engagement_rate"
+  }
+}
