@@ -242,20 +242,36 @@ def fill_creative_tests(
         import time
         while url:
             success = False
-            for retry in range(4):
+            last_status = None
+            last_body = None
+            for retry in range(6):
                 r = requests.get(url, params=params, timeout=30)
+                last_status = r.status_code
+                last_body = r.text[:500]
                 if r.status_code == 200:
                     success = True
                     break
-                elif r.status_code == 429 or r.status_code >= 500:
-                    time.sleep(2 ** retry)
+                # Detect FB rate limit codes in body (error.code 17, 4, 32, 613)
+                is_rate_limit = False
+                try:
+                    err = r.json().get("error", {}) or {}
+                    if err.get("code") in (17, 4, 32, 613) or err.get("is_transient"):
+                        is_rate_limit = True
+                except Exception:
+                    pass
+                if r.status_code == 429 or r.status_code >= 500 or is_rate_limit:
+                    sleep_s = min(2 ** retry, 60)
+                    if progress_callback:
+                        progress_callback(f"⏳ FB rate limit (conta {acc_raw}, status {r.status_code}). Retry {retry+1}/6 em {sleep_s}s...")
+                    time.sleep(sleep_s)
                     continue
                 else:
                     break
-            
+
             if not success:
-                if progress_callback: progress_callback(f"⚠️ Erro/Rate Limit ao puxar contas do Facebook. Algumas campanhas foram ignoradas.")
-                break
+                msg = f"⚠️ Falha ao puxar campanhas da conta {acc_raw} (status {last_status}): {last_body}"
+                if progress_callback: progress_callback(msg)
+                raise RuntimeError(msg)
                 
             data = r.json()
             page_data = data.get("data", [])
