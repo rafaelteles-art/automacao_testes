@@ -367,6 +367,33 @@ from fill_planilha_by_dates import (
     fill_sheet,
 )
 
+# Persistent storage for planilhas + label dictionary.
+# In Streamlit Cloud the local filesystem is ephemeral, so JSON files in
+# `config/` are wiped on every restart. Configure a Google Sheet to be the
+# durable source of truth — set `planilhas_config_sheet_url` in st.secrets
+# (or the env var PLANILHAS_CONFIG_SHEET_URL for local dev).
+def _get_config_sheet_url():
+    try:
+        url = st.secrets.get("planilhas_config_sheet_url")
+        if url:
+            return str(url)
+    except Exception:
+        pass
+    return os.environ.get("PLANILHAS_CONFIG_SHEET_URL") or None
+
+_config_sheet_url = _get_config_sheet_url()
+if _config_sheet_url:
+    cfg_store.configure(gc, _config_sheet_url)
+    label_map_store.configure(gc, _config_sheet_url)
+    st.caption(f"💾 Config persistente: planilha de config no Google Sheets.")
+else:
+    st.warning(
+        "⚠️ **Persistência local apenas** — planilhas cadastradas e o dicionário de labels "
+        "vão sumir a cada reinício do Streamlit Cloud. Configure uma planilha de config no "
+        "Google Sheets e adicione `planilhas_config_sheet_url = \"https://docs.google.com/...\"` "
+        "em **Settings → Secrets** (compartilhada com o e-mail do robô como Editor)."
+    )
+
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_rt_campaigns(token):
     rt = RedTrackAPI(token)

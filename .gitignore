@@ -27,3 +27,10 @@ dashboard.html
 # Claude memory compiler (separate repo cloned as subdirectory)
 .claude-memory-compiler/
 .claude/settings.local.json
+
+# Local-only config. Canonical copy lives in the Google Sheets config when
+# `planilhas_config_sheet_url` is set. Keeping these out of version control so
+# `git pull` never overwrites the user's saved planilhas/labels — and so the
+# Streamlit Cloud filesystem (ephemeral) is never the source of truth.
+config/planilhas.json
+config/metric_labels.json

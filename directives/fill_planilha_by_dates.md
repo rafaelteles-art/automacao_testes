@@ -9,20 +9,44 @@ Em cada planilha, as colunas que tiverem **uma data na primeira linha** são pre
 
 ## Camadas
 
-### Configuração (uma vez por planilha)
-Arquivo: `config/planilhas.json` (gerenciado pelo módulo [planilha_config_store.py](../execution/planilha_config_store.py)).
+### Persistência (Google Sheets, multi-usuário)
+Em produção (Streamlit Cloud) o filesystem é efêmero — JSONs em `config/` são apagados a cada reinício. Por isso, a fonte de verdade canônica é uma **planilha de config no Google Sheets**, com duas abas:
 
+- **`planilhas`** — gerenciada por [planilha_config_store.py](../execution/planilha_config_store.py)
+  - 1 linha por planilha. Colunas: `id | nome | g_url | aba | campaign_ids | metric_rows | vturb_player_ids`
+  - `campaign_ids` / `vturb_player_ids`: separados por vírgula
+  - `metric_rows`: JSON-encoded (deprecado — mantido só por retrocompat)
+- **`labels`** — gerenciada por [label_map_store.py](../execution/label_map_store.py)
+  - 1 linha por entrada. Colunas: `label | metric` (label já normalizado em uppercase, sem acento)
+
+**Por que 1 linha por entrada:** `upsert` e `delete` operam num único range, então duas pessoas adicionando planilhas/labels ao mesmo tempo **não colidem** (cada `append_row` é atômico no lado do Google Sheets). A única colisão possível é dois usuários editando a mesma entrada no mesmo segundo, o que é desprezível com 2 usuários.
+
+**Setup (uma vez):**
+1. Crie uma Google Sheet vazia (vai armazenar as configs — não confundir com as planilhas-alvo de preenchimento).
+2. Compartilhe com o `client_email` da service account (do `credentials.json`) como **Editor**.
+3. Em **Streamlit Cloud → App settings → Secrets**, adicione:
+   ```toml
+   planilhas_config_sheet_url = "https://docs.google.com/spreadsheets/d/.../edit"
+   ```
+   Para dev local: defina a env var `PLANILHAS_CONFIG_SHEET_URL` no `.env`.
+4. Os stores criam as abas `planilhas` e `labels` automaticamente no primeiro acesso. Se houver `config/planilhas.json` ou `config/metric_labels.json` locais e a aba estiver vazia, os dados locais são copiados (seed).
+
+**Cache:** Cada store tem cache em memória com TTL de 30s para reduzir reads. Toda escrita invalida o cache local (mas não o cache do *outro* processo — janela máxima de divergência entre usuários é 30s).
+
+**Fallback:** Se `planilhas_config_sheet_url` não estiver configurado, os stores caem no JSON local em `config/` (modo dev). A UI exibe um warning vermelho neste caso.
+
+### Cadastro (uma vez por planilha)
 Cada entrada contém:
 - `id` — uuid gerado automaticamente
 - `nome` — apelido livre
-- `g_url` — link do Google Sheets
+- `g_url` — link do Google Sheets-alvo
 - `aba` — nome da aba
 - `campaign_ids` — lista de IDs de campanhas RedTrack associadas
 - `vturb_player_ids` — lista de player_ids VTurb que compõem o A/B test (métricas somadas entre os variantes)
-- `metric_rows` — **deprecado**. O mapeamento linha→métrica agora é global, feito via `config/metric_labels.json` lido pelo [label_map_store.py](../execution/label_map_store.py). Campo preservado no JSON apenas por retrocompatibilidade; não é mais lido pelo preenchedor.
+- `metric_rows` — **deprecado**. O mapeamento linha→métrica agora é global (aba `labels`).
 
 ### Dicionário global Label → Métrica
-Arquivo: `config/metric_labels.json` ([label_map_store.py](../execution/label_map_store.py)).
+Aba `labels` da planilha de config (ou `config/metric_labels.json` no fallback local).
 
 Estrutura: `{ "labels": { "GASTO FACEBOOK": "cost", "CLIQUES": "clicks", ... } }`.
 
