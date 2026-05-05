@@ -372,26 +372,55 @@ from fill_planilha_by_dates import (
 # `config/` are wiped on every restart. Configure a Google Sheet to be the
 # durable source of truth — set `planilhas_config_sheet_url` in st.secrets
 # (or the env var PLANILHAS_CONFIG_SHEET_URL for local dev).
+_SECRET_KEY = "planilhas_config_sheet_url"
+
 def _get_config_sheet_url():
+    """Return (url, source_label) — `source_label` is for diagnostics."""
+    # 1. st.secrets at top level
     try:
-        url = st.secrets.get("planilhas_config_sheet_url")
-        if url:
-            return str(url)
+        if _SECRET_KEY in st.secrets:
+            v = st.secrets[_SECRET_KEY]
+            if v:
+                return str(v), "st.secrets[top-level]"
     except Exception:
         pass
-    return os.environ.get("PLANILHAS_CONFIG_SHEET_URL") or None
+    # 2. st.secrets nested under [planilhas]
+    try:
+        section = st.secrets["planilhas"] if "planilhas" in st.secrets else None
+        if section and "config_sheet_url" in section and section["config_sheet_url"]:
+            return str(section["config_sheet_url"]), "st.secrets[planilhas].config_sheet_url"
+    except Exception:
+        pass
+    # 3. environment variable (local dev / .env)
+    env_v = os.environ.get("PLANILHAS_CONFIG_SHEET_URL")
+    if env_v:
+        return env_v, "env PLANILHAS_CONFIG_SHEET_URL"
+    return None, None
 
-_config_sheet_url = _get_config_sheet_url()
+def _list_secret_keys():
+    """Best-effort: list top-level keys present in st.secrets (for the warning)."""
+    try:
+        return sorted(list(st.secrets.keys()))
+    except Exception:
+        return []
+
+_config_sheet_url, _config_source = _get_config_sheet_url()
 if _config_sheet_url:
     cfg_store.configure(gc, _config_sheet_url)
     label_map_store.configure(gc, _config_sheet_url)
-    st.caption(f"💾 Config persistente: planilha de config no Google Sheets.")
+    st.caption(f"💾 Config persistente em Google Sheets — fonte: `{_config_source}`")
 else:
+    keys_present = _list_secret_keys()
+    keys_str = ", ".join(f"`{k}`" for k in keys_present) if keys_present else "_(nenhuma chave detectada — nenhum secret configurado)_"
     st.warning(
         "⚠️ **Persistência local apenas** — planilhas cadastradas e o dicionário de labels "
-        "vão sumir a cada reinício do Streamlit Cloud. Configure uma planilha de config no "
-        "Google Sheets e adicione `planilhas_config_sheet_url = \"https://docs.google.com/...\"` "
-        "em **Settings → Secrets** (compartilhada com o e-mail do robô como Editor)."
+        "vão sumir a cada reinício do Streamlit Cloud.\n\n"
+        f"**Não encontrei** `{_SECRET_KEY}` no `st.secrets` nem `[planilhas].config_sheet_url`, "
+        f"nem a env var `PLANILHAS_CONFIG_SHEET_URL`.\n\n"
+        f"**Chaves de secret atualmente visíveis:** {keys_str}\n\n"
+        f"Adicione em **Settings → Secrets** no Streamlit Cloud (formato TOML, sem aspas na chave):\n"
+        f"```toml\n{_SECRET_KEY} = \"https://docs.google.com/spreadsheets/d/SEU_ID/edit\"\n```\n"
+        f"E reinicie o app (Manage app → Reboot)."
     )
 
 @st.cache_data(ttl=600, show_spinner=False)
