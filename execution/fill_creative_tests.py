@@ -379,6 +379,11 @@ def fill_creative_tests(
             # Get specific start date from Col C (column 3)
             date_col_c = row_data[2] if len(row_data) > 2 else ""
             row_date_start = parse_excel_date(date_col_c, date_start)
+
+            # Current Col D value (data fim) — only write if empty so manual
+            # entries and prior verdicts are preserved across re-runs.
+            cell_d_val = row_data[3] if len(row_data) > 3 else ""
+            col_d_empty = not cell_d_val or str(cell_d_val).strip() == ""
             
             best_fin = None
             max_imps = -1
@@ -426,14 +431,29 @@ def fill_creative_tests(
                 
             cells_to_update.append(gspread.Cell(row=row_idx, col=12, value=round(cpa, 2)))
 
-            # Col M - Status auto-fill based on vendas and gasto
+            # Col M - Status auto-fill based on vendas and gasto.
+            # When marking VALIDADO/DESCARTADO, also stamp Col D (data fim)
+            # with the analysis end date — web_app pads date_end by +1 day, so
+            # subtract it back to match the date the user picked.
+            verdict_status = None
             if vendas >= 3:
-                cells_to_update.append(gspread.Cell(row=row_idx, col=13, value="VALIDADO"))
+                verdict_status = "VALIDADO"
             elif vendas == 2 and rt_cost_brl > 800:
-                cells_to_update.append(gspread.Cell(row=row_idx, col=13, value="VALIDADO"))
+                verdict_status = "VALIDADO"
             elif vendas < 2 and rt_cost_brl >= 800:
-                cells_to_update.append(gspread.Cell(row=row_idx, col=13, value="DESCARTADO"))
-            # else: gasto < 800 → don't alter column M
+                verdict_status = "DESCARTADO"
+            # else: gasto < 800 → don't alter column M / D
+
+            if verdict_status:
+                cells_to_update.append(gspread.Cell(row=row_idx, col=13, value=verdict_status))
+                if col_d_empty:
+                    try:
+                        end_dt = datetime.datetime.strptime(date_end, "%Y-%m-%d").date() - datetime.timedelta(days=1)
+                        data_fim_br = end_dt.strftime("%d/%m/%Y")
+                    except Exception:
+                        tz_brt = datetime.timezone(datetime.timedelta(hours=-3))
+                        data_fim_br = datetime.datetime.now(tz_brt).strftime("%d/%m/%Y")
+                    cells_to_update.append(gspread.Cell(row=row_idx, col=4, value=data_fim_br))
 
             filled_metrics += 1
         else:
