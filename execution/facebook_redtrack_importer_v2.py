@@ -49,36 +49,48 @@ class FacebookAdsAPI:
         all_accounts = []
         seen_ids = set()
         
-        # 1. Fetch owned ad accounts
+        # 1. Fetch owned ad accounts (with pagination)
         try:
-            url_owned = f"{self.base_url}/{business_manager_id}/owned_ad_accounts"
+            url = f"{self.base_url}/{business_manager_id}/owned_ad_accounts"
             params = {
                 'fields': 'id,name,currency,account_status',
                 'limit': 100
             }
-            response_owned = self.session.get(url_owned, params=params)
-            response_owned.raise_for_status()
-            owned_data = response_owned.json().get('data', [])
-            for acc in owned_data:
-                if acc['id'] not in seen_ids:
-                    all_accounts.append(acc)
-                    seen_ids.add(acc['id'])
+            while url:
+                response = self.session.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                for acc in data.get('data', []):
+                    if acc['id'] not in seen_ids:
+                        all_accounts.append(acc)
+                        seen_ids.add(acc['id'])
+                # Follow pagination cursor — without this, BMs with >100 accounts
+                # silently lose every account past the first page.
+                url = data.get('paging', {}).get('next')
+                params = None  # the 'next' URL already includes all params
         except Exception as e:
-            print(f"❌ Error fetching owned ad accounts: {e}")
+            print(f"❌ Error fetching owned ad accounts for {business_manager_id}: {e}")
 
-        # 2. Fetch shared/client ad accounts
+        # 2. Fetch shared/client ad accounts (with pagination)
         try:
-            url_client = f"{self.base_url}/{business_manager_id}/client_ad_accounts"
-            response_client = self.session.get(url_client, params=params)
-            response_client.raise_for_status()
-            client_data = response_client.json().get('data', [])
-            for acc in client_data:
-                if acc['id'] not in seen_ids:
-                    all_accounts.append(acc)
-                    seen_ids.add(acc['id'])
+            url = f"{self.base_url}/{business_manager_id}/client_ad_accounts"
+            params = {
+                'fields': 'id,name,currency,account_status',
+                'limit': 100
+            }
+            while url:
+                response = self.session.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                for acc in data.get('data', []):
+                    if acc['id'] not in seen_ids:
+                        all_accounts.append(acc)
+                        seen_ids.add(acc['id'])
+                url = data.get('paging', {}).get('next')
+                params = None  # the 'next' URL already includes all params
         except Exception as e:
-            print(f"❌ Error fetching client ad accounts: {e}")
-            
+            print(f"❌ Error fetching client ad accounts for {business_manager_id}: {e}")
+
         return all_accounts
     
     def get_ad_insights(self, account_id: str, date_start: str, date_end: str, level: str = 'ad', progress_callback=None) -> List[Dict]:

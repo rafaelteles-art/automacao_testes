@@ -18,22 +18,23 @@ st.set_page_config(page_title="Gestor de Performance FB Ads", page_icon="📈", 
 # Sidebar - Configurações Iniciais
 st.sidebar.title("Configurações ⚙️")
 
-# Default token (ocultado do código fonte no production)
+# Initialize token state before sidebar renders (populated from store on first run of each session)
+for _k in ("fb_token", "rt_token", "vturb_token"):
+    if _k not in st.session_state:
+        st.session_state[_k] = ""
+
 st.sidebar.markdown("**Tokens de Integração API**")
-fb_token = st.sidebar.text_input("Token do Facebook Ads", type="password")
+st.sidebar.text_input("Token do Facebook Ads", type="password", key="fb_token")
+st.sidebar.text_input("Chave de API RedTrack", type="password", key="rt_token")
+st.sidebar.text_input("Chave de API VTurb", type="password", key="vturb_token")
 
-if not fb_token:
-    fb_token = "EAAWDHozjODgBRYSLNrJKwCXTvowH12ayUGzsp7bZBqbHZBGFrQcaZAXpFwgiq3byQ2cg6ZBHFZCLn8hCXZAN8ZB1BzjQZBbtEP8jgdGzcpdNiFfgXZCKtTzNVQZAAYclfzwEyLOfsL3eazEIe22X5PQnJ6qUSZCn266p1Oi0eEQ84yFMh7tvg6SblkNFlMgZAxlwXDji"
+if st.sidebar.button("💾 Salvar tokens"):
+    st.session_state["_save_tokens_requested"] = True
 
-rt_token = st.sidebar.text_input("Chave de API RedTrack", type="password")
-
-if not rt_token:
-    rt_token = "wB7qY69R0KVU9tl4TBaQ"
-
-vturb_token = st.sidebar.text_input("Chave de API VTurb", type="password")
-
-if not vturb_token:
-    vturb_token = "62a36884887710e04f6ee66cde9ee9cebeef8efe6c50f25aa07437cb0111e0d6"
+# Effective token values — use saved/entered value or fall back to hardcoded default
+fb_token = st.session_state["fb_token"] or "EAAWDHozjODgBRYSLNrJKwCXTvowH12ayUGzsp7bZBqbHZBGFrQcaZAXpFwgiq3byQ2cg6ZBHFZCLn8hCXZAN8ZB1BzjQZBbtEP8jgdGzcpdNiFfgXZCKtTzNVQZAAYclfzwEyLOfsL3eazEIe22X5PQnJ6qUSZCn266p1Oi0eEQ84yFMh7tvg6SblkNFlMgZAxlwXDji"
+rt_token = st.session_state["rt_token"] or "wB7qY69R0KVU9tl4TBaQ"
+vturb_token = st.session_state["vturb_token"] or "62a36884887710e04f6ee66cde9ee9cebeef8efe6c50f25aa07437cb0111e0d6"
 
 st.sidebar.markdown("---")
 
@@ -359,6 +360,7 @@ st.caption("Cada planilha é associada a uma ou mais campanhas. As colunas que t
 
 import planilha_config_store as cfg_store
 import label_map_store
+import token_store
 from facebook_redtrack_importer_v2 import RedTrackAPI
 from vturb_api import VTurbAPI
 from fill_planilha_by_dates import (
@@ -408,6 +410,7 @@ _config_sheet_url, _config_source = _get_config_sheet_url()
 if _config_sheet_url:
     cfg_store.configure(gc, _config_sheet_url)
     label_map_store.configure(gc, _config_sheet_url)
+    token_store.configure(gc, _config_sheet_url)
     st.caption(f"💾 Config persistente em Google Sheets — fonte: `{_config_source}`")
 else:
     keys_present = _list_secret_keys()
@@ -422,6 +425,28 @@ else:
         f"```toml\n{_SECRET_KEY} = \"https://docs.google.com/spreadsheets/d/SEU_ID/edit\"\n```\n"
         f"E reinicie o app (Manage app → Reboot)."
     )
+
+# Save tokens if the sidebar button was clicked
+if st.session_state.get("_save_tokens_requested"):
+    token_store.save({
+        "fb_token": st.session_state["fb_token"],
+        "rt_token": st.session_state["rt_token"],
+        "vturb_token": st.session_state["vturb_token"],
+    })
+    st.session_state.pop("_save_tokens_requested")
+    st.toast("✅ Tokens salvos com sucesso!")
+
+# Load tokens from store once per browser session
+if not st.session_state.get("_tokens_loaded_from_store"):
+    _saved_tokens = token_store.load()
+    _tokens_changed = False
+    for _k in ("fb_token", "rt_token", "vturb_token"):
+        if _saved_tokens.get(_k):
+            st.session_state[_k] = _saved_tokens[_k]
+            _tokens_changed = True
+    st.session_state["_tokens_loaded_from_store"] = True
+    if _tokens_changed:
+        st.rerun()
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_rt_campaigns(token):
