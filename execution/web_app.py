@@ -15,13 +15,95 @@ from fill_creative_tests import fill_creative_tests
 # Configuração da página Streamlit
 st.set_page_config(page_title="Gestor de Performance FB Ads", page_icon="📈", layout="wide")
 
+# =============================================================================
+# Autenticação Google Sheets + stores persistentes — feito no TOPO, antes do
+# sidebar. Carregar os tokens salvos antes dos campos do sidebar renderizarem
+# elimina a necessidade de st.rerun() (que re-executava o script e DOBRAVA as
+# chamadas à API do Google, estourando a cota de leitura por minuto).
+# =============================================================================
+import gspread
+from google.oauth2.service_account import Credentials
+import json
+import planilha_config_store as cfg_store
+import label_map_store
+import token_store
+
+@st.cache_resource
+def get_gspread_client():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    try:
+        has_secret = False
+        try:
+            has_secret = "gcp_service_account" in st.secrets
+        except Exception:
+            has_secret = False
+        if has_secret:
+            secret_info = st.secrets["gcp_service_account"]
+            if isinstance(secret_info, str):
+                secret_info = json.loads(secret_info)
+            else:
+                secret_info = dict(secret_info)
+            creds = Credentials.from_service_account_info(secret_info, scopes=scopes)
+            return gspread.authorize(creds)
+        elif os.path.exists("credentials.json"):
+            creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+            return gspread.authorize(creds)
+    except Exception as e:
+        import traceback
+        st.error(f"Erro ao carregar credenciais: {e} | {traceback.format_exc()}")
+    return None
+
+gc = get_gspread_client()
+if gc is None:
+    st.warning("⚠️ **Autenticação Pendente:** Para acessar o Google Sheets, você precisa configurar um arquivo `credentials.json` na raiz do projeto ou no Streamlit Secrets em `[gcp_service_account]`.")
+    st.stop()
+
+_SECRET_KEY = "planilhas_config_sheet_url"
+
+def _get_config_sheet_url():
+    """Return (url, source_label) — `source_label` is for diagnostics."""
+    try:
+        if _SECRET_KEY in st.secrets:
+            v = st.secrets[_SECRET_KEY]
+            if v:
+                return str(v), "st.secrets[top-level]"
+    except Exception:
+        pass
+    try:
+        section = st.secrets["planilhas"] if "planilhas" in st.secrets else None
+        if section and "config_sheet_url" in section and section["config_sheet_url"]:
+            return str(section["config_sheet_url"]), "st.secrets[planilhas].config_sheet_url"
+    except Exception:
+        pass
+    env_v = os.environ.get("PLANILHAS_CONFIG_SHEET_URL")
+    if env_v:
+        return env_v, "env PLANILHAS_CONFIG_SHEET_URL"
+    return None, None
+
+def _list_secret_keys():
+    """Best-effort: list top-level keys present in st.secrets (for the warning)."""
+    try:
+        return sorted(list(st.secrets.keys()))
+    except Exception:
+        return []
+
+_config_sheet_url, _config_source = _get_config_sheet_url()
+if _config_sheet_url:
+    cfg_store.configure(gc, _config_sheet_url)
+    label_map_store.configure(gc, _config_sheet_url)
+    token_store.configure(gc, _config_sheet_url)
+
+# Carrega os tokens salvos UMA vez por sessão, antes do sidebar renderizar.
+# setdefault só grava se a chave ainda não existir — depois disso os widgets
+# do sidebar passam a ser os donos do estado.
+if not st.session_state.get("_tokens_loaded_from_store"):
+    _saved_tokens = token_store.load()
+    for _k in ("fb_token", "rt_token", "vturb_token"):
+        st.session_state.setdefault(_k, _saved_tokens.get(_k, "") or "")
+    st.session_state["_tokens_loaded_from_store"] = True
+
 # Sidebar - Configurações Iniciais
 st.sidebar.title("Configurações ⚙️")
-
-# Initialize token state before sidebar renders (populated from store on first run of each session)
-for _k in ("fb_token", "rt_token", "vturb_token"):
-    if _k not in st.session_state:
-        st.session_state[_k] = ""
 
 st.sidebar.markdown("**Tokens de Integração API**")
 st.sidebar.text_input("Token do Facebook Ads", type="password", key="fb_token")
@@ -253,44 +335,6 @@ st.markdown("---")
 st.markdown("## 📝 Preencher Planilha (Google Sheets)")
 st.markdown("Insira o Link da sua Planilha do Google e selecione a Aba.")
 
-import gspread
-from google.oauth2.service_account import Credentials
-import json
-
-@st.cache_resource
-def get_gspread_client():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    try:
-        has_secret = False
-        try:
-            has_secret = "gcp_service_account" in st.secrets
-        except Exception:
-            has_secret = False
-        if has_secret:
-            # Load from secrets (assuming it's a dict or JSON string)
-            secret_info = st.secrets["gcp_service_account"]
-            if isinstance(secret_info, str):
-                secret_info = json.loads(secret_info)
-            else:
-                # Convert explicitly to a dict (st.secrets returns a SecretDict object, but from_service_account expects standard dict)
-                secret_info = dict(secret_info)
-                
-            creds = Credentials.from_service_account_info(secret_info, scopes=scopes)
-            return gspread.authorize(creds)
-        elif os.path.exists("credentials.json"):
-            creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-            return gspread.authorize(creds)
-    except Exception as e:
-        import traceback
-        st.error(f"Erro ao carregar credenciais: {e} | {traceback.format_exc()}")
-    return None
-
-gc = get_gspread_client()
-
-if gc is None:
-    st.warning("⚠️ **Autenticação Pendente:** Para acessar o Google Sheets, você precisa configurar um arquivo `credentials.json` na raiz do projeto ou no Streamlit Secrets em `[gcp_service_account]`.")
-    st.stop()
-
 # Connection UI
 g_url = st.text_input("🔗 Link da Planilha do Google (ex: https://docs.google.com/spreadsheets/d/...)")
 
@@ -358,9 +402,6 @@ st.markdown("---")
 st.markdown("## 📅 Preencher por Campanhas RedTrack")
 st.caption("Cada planilha é associada a uma ou mais campanhas. As colunas que tiverem uma data na primeira linha são preenchidas com a soma das métricas dessas campanhas para aquela data.")
 
-import planilha_config_store as cfg_store
-import label_map_store
-import token_store
 from facebook_redtrack_importer_v2 import RedTrackAPI
 from vturb_api import VTurbAPI
 from fill_planilha_by_dates import (
@@ -369,48 +410,11 @@ from fill_planilha_by_dates import (
     fill_sheet,
 )
 
-# Persistent storage for planilhas + label dictionary.
-# In Streamlit Cloud the local filesystem is ephemeral, so JSON files in
-# `config/` are wiped on every restart. Configure a Google Sheet to be the
-# durable source of truth — set `planilhas_config_sheet_url` in st.secrets
-# (or the env var PLANILHAS_CONFIG_SHEET_URL for local dev).
-_SECRET_KEY = "planilhas_config_sheet_url"
-
-def _get_config_sheet_url():
-    """Return (url, source_label) — `source_label` is for diagnostics."""
-    # 1. st.secrets at top level
-    try:
-        if _SECRET_KEY in st.secrets:
-            v = st.secrets[_SECRET_KEY]
-            if v:
-                return str(v), "st.secrets[top-level]"
-    except Exception:
-        pass
-    # 2. st.secrets nested under [planilhas]
-    try:
-        section = st.secrets["planilhas"] if "planilhas" in st.secrets else None
-        if section and "config_sheet_url" in section and section["config_sheet_url"]:
-            return str(section["config_sheet_url"]), "st.secrets[planilhas].config_sheet_url"
-    except Exception:
-        pass
-    # 3. environment variable (local dev / .env)
-    env_v = os.environ.get("PLANILHAS_CONFIG_SHEET_URL")
-    if env_v:
-        return env_v, "env PLANILHAS_CONFIG_SHEET_URL"
-    return None, None
-
-def _list_secret_keys():
-    """Best-effort: list top-level keys present in st.secrets (for the warning)."""
-    try:
-        return sorted(list(st.secrets.keys()))
-    except Exception:
-        return []
-
-_config_sheet_url, _config_source = _get_config_sheet_url()
+# Diagnóstico da persistência. A configuração dos stores (cfg_store,
+# label_map_store, token_store) já foi feita no topo do script — aqui só
+# exibimos o status para o usuário. `_config_sheet_url`, `_config_source`,
+# `_SECRET_KEY` e `_list_secret_keys` vêm do bloco de inicialização do topo.
 if _config_sheet_url:
-    cfg_store.configure(gc, _config_sheet_url)
-    label_map_store.configure(gc, _config_sheet_url)
-    token_store.configure(gc, _config_sheet_url)
     st.caption(f"💾 Config persistente em Google Sheets — fonte: `{_config_source}`")
 else:
     keys_present = _list_secret_keys()
@@ -436,17 +440,6 @@ if st.session_state.get("_save_tokens_requested"):
     st.session_state.pop("_save_tokens_requested")
     st.toast("✅ Tokens salvos com sucesso!")
 
-# Load tokens from store once per browser session
-if not st.session_state.get("_tokens_loaded_from_store"):
-    _saved_tokens = token_store.load()
-    _tokens_changed = False
-    for _k in ("fb_token", "rt_token", "vturb_token"):
-        if _saved_tokens.get(_k):
-            st.session_state[_k] = _saved_tokens[_k]
-            _tokens_changed = True
-    st.session_state["_tokens_loaded_from_store"] = True
-    if _tokens_changed:
-        st.rerun()
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_rt_campaigns(token):
