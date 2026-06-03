@@ -1,0 +1,53 @@
+name: Daily Dossiê Fill
+
+# Fills yesterday's column in every Dossiê sheet (planilhas flagged auto_fill).
+# 0 10 * * * UTC = 07:00 BRT (Brazil has no DST since 2019, so this is stable).
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Backfill a specific day (YYYY-MM-DD). Leave empty for yesterday (BRT)."
+        required: false
+        default: ""
+
+jobs:
+  fill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write service-account credentials
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: |
+          if [ -z "$GOOGLE_CREDENTIALS" ]; then
+            echo "::error::Secret GOOGLE_CREDENTIALS is not set."
+            exit 1
+          fi
+          printf '%s' "$GOOGLE_CREDENTIALS" > credentials.json
+
+      - name: Fill Dossiês
+        env:
+          PLANILHAS_CONFIG_SHEET_URL: ${{ secrets.PLANILHAS_CONFIG_SHEET_URL }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            ARGS="--date ${{ github.event.inputs.date }}"
+          fi
+          python execution/fill_dossies_daily.py $ARGS
+
+      - name: Remove credentials
+        if: always()
+        run: rm -f credentials.json

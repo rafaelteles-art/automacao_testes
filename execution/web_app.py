@@ -482,7 +482,8 @@ with tab_cfg:
         st.info("Nenhuma planilha cadastrada ainda. Use o formulário abaixo.")
     for p in planilhas:
         n_vturb = len(p.get("vturb_player_ids", []) or [])
-        header = f"📄 {p['nome']}  —  aba: {p['aba']}  —  {len(p.get('campaign_ids', []))} campanha(s)"
+        badge = "🤖 " if p.get("auto_fill") else ""
+        header = f"{badge}📄 {p['nome']}  —  aba: {p['aba']}  —  {len(p.get('campaign_ids', []))} campanha(s)"
         if n_vturb:
             header += f"  —  {n_vturb} player(s) VTurb"
         with st.expander(header):
@@ -536,6 +537,12 @@ with tab_cfg:
             help="Selecione 1 ou mais players. Para A/B test, marque todos os variantes — views, plays, pitch etc. serão somados.",
         )
 
+        auto_fill_v = st.checkbox(
+            "🤖 Dossiê — preencher automaticamente todo dia (07:00 BRT)",
+            value=bool(editing.get("auto_fill")) if editing else False,
+            help="Quando marcado, o job diário (GitHub Actions) preenche a coluna de ONTEM desta planilha às 07:00 (UTC-3).",
+        )
+
         st.caption("ℹ️ O preenchimento agora identifica a linha pelo valor da **coluna A** (ex. 'GASTO FACEBOOK'). Edite o dicionário global abaixo para controlar label → métrica.")
 
         col_s, col_c = st.columns([1, 1])
@@ -560,6 +567,7 @@ with tab_cfg:
                     metric_rows=editing.get("metric_rows") if editing else {},
                     planilha_id=editing_id,
                     vturb_player_ids=[vturb_label_to_id[lbl] for lbl in vturb_v],
+                    auto_fill=auto_fill_v,
                 )
                 if editing_id:
                     del st.session_state["editing_planilha_id"]

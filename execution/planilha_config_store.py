@@ -16,9 +16,10 @@ Streamlit Cloud has an ephemeral filesystem — the local JSON does NOT survive
 restarts, which is why production must use the Sheets backend.
 
 Sheets tab schema (column order matters):
-    id | nome | g_url | aba | campaign_ids | metric_rows | vturb_player_ids
+    id | nome | g_url | aba | campaign_ids | metric_rows | vturb_player_ids | auto_fill
   - campaign_ids / vturb_player_ids: comma-separated strings.
   - metric_rows: JSON-encoded object (kept for backward compat with old data).
+  - auto_fill: "1" when this planilha is a Dossiê (filled by the daily job), "" otherwise.
 """
 
 from __future__ import annotations
@@ -36,8 +37,15 @@ _CONFIG_DIR = os.path.join(_PROJECT_ROOT, "config")
 _CONFIG_PATH = os.path.join(_CONFIG_DIR, "planilhas.json")
 
 _TAB = "planilhas"
-_HEADERS = ["id", "nome", "g_url", "aba", "campaign_ids", "metric_rows", "vturb_player_ids"]
-_LAST_COL_LETTER = chr(ord("A") + len(_HEADERS) - 1)  # "G"
+_HEADERS = ["id", "nome", "g_url", "aba", "campaign_ids", "metric_rows", "vturb_player_ids", "auto_fill"]
+_LAST_COL_LETTER = chr(ord("A") + len(_HEADERS) - 1)  # "H"
+
+# Strings that mean "yes" for the auto_fill flag (case-insensitive).
+_TRUTHY = {"1", "true", "sim", "yes", "x", "verdadeiro"}
+
+
+def _parse_bool(value) -> bool:
+    return str(value or "").strip().lower() in _TRUTHY
 
 _CACHE_TTL_SEC = 30
 _cache: Dict = {"data": None, "ts": 0.0}
@@ -88,6 +96,7 @@ def _row_to_dict(row: List[str]) -> Dict:
         rec["metric_rows"] = json.loads(raw) if raw else {}
     except Exception:
         rec["metric_rows"] = {}
+    rec["auto_fill"] = _parse_bool(rec.get("auto_fill"))
     return rec
 
 
@@ -100,6 +109,7 @@ def _dict_to_row(rec: Dict) -> List[str]:
         ",".join(rec.get("campaign_ids", []) or []),
         json.dumps(rec.get("metric_rows", {}) or {}, ensure_ascii=False),
         ",".join(rec.get("vturb_player_ids", []) or []),
+        "1" if rec.get("auto_fill") else "",
     ]
 
 
@@ -181,6 +191,7 @@ def upsert(
     metric_rows: Optional[Dict[str, str]] = None,
     planilha_id: Optional[str] = None,
     vturb_player_ids: Optional[List[str]] = None,
+    auto_fill: bool = False,
 ) -> Dict:
     """Create or update a planilha entry. Returns the stored dict."""
     record = {
@@ -191,6 +202,7 @@ def upsert(
         "campaign_ids": [c for c in (campaign_ids or []) if c],
         "metric_rows": metric_rows or {},
         "vturb_player_ids": [p for p in (vturb_player_ids or []) if p],
+        "auto_fill": bool(auto_fill),
     }
 
     if not _is_sheets_backend():
