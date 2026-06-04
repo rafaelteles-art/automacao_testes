@@ -432,10 +432,13 @@ else:
 
 # Save tokens if the sidebar button was clicked
 if st.session_state.get("_save_tokens_requested"):
+    # Persist the EFFECTIVE tokens (field value or hardcoded fallback), not the
+    # raw field — otherwise an empty field would save nothing and the headless
+    # daily job (which has no fallback) can't find a token in the store.
     token_store.save({
-        "fb_token": st.session_state["fb_token"],
-        "rt_token": st.session_state["rt_token"],
-        "vturb_token": st.session_state["vturb_token"],
+        "fb_token": fb_token,
+        "rt_token": rt_token,
+        "vturb_token": vturb_token,
     })
     st.session_state.pop("_save_tokens_requested")
     st.toast("✅ Tokens salvos com sucesso!")
