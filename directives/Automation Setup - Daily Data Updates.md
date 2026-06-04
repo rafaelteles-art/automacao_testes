@@ -57,6 +57,16 @@ python execution/fill_dossies_daily.py --dry-run          # fills sheets, skips 
 On GitHub: Actions → "Daily Dossiê Fill" → Run workflow (optionally set a date).
 
 ### Edge cases / learnings
+- **Tokens must live in the config Sheet.** The job has NO hardcoded token
+  fallback (unlike the app). It reads `rt_token`/`vturb_token` from the `tokens`
+  tab via `token_store`. If that tab has no `rt_token`, the job exits 2 with
+  "rt_token ausente". Populate it by entering the tokens in the app sidebar and
+  clicking **💾 Salvar tokens** (the button now saves the *effective* values,
+  so it works even if a field shows blank).
+- **BOM in CI secrets.** Setting a secret by piping through PowerShell can prefix
+  a UTF-8 BOM. `fill_dossies_daily.py` defends against this (reads credentials
+  with `utf-8-sig`, lstrips the BOM from `PLANILHAS_CONFIG_SHEET_URL`). Symptom
+  if reintroduced elsewhere: `JSONDecodeError: Unexpected UTF-8 BOM`.
 - **Timezone:** BRT is a fixed UTC-3; Brazil abolished DST in 2019, so the cron
   never drifts. No DST handling needed.
 - **Late conversions:** filling only yesterday means earlier days are *not*
