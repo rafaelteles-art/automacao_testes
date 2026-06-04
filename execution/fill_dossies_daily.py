@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import traceback
@@ -66,7 +67,11 @@ def _build_client() -> gspread.Client:
             f"Service-account credentials not found at '{cred_path}'. "
             "In CI, write the secret to credentials.json before running."
         )
-    creds = Credentials.from_service_account_file(cred_path, scopes=SCOPES)
+    # Read with utf-8-sig so a leading UTF-8 BOM (e.g. introduced when the CI
+    # secret was piped through PowerShell) is stripped before JSON parsing.
+    with open(cred_path, "r", encoding="utf-8-sig") as f:
+        info = json.load(f)
+    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
@@ -95,7 +100,8 @@ def run(target_day: date, dry_run: bool = False) -> int:
     """Fill every Dossiê for `target_day`. Returns process exit code."""
     gc = _build_client()
 
-    sheet_url = os.environ.get("PLANILHAS_CONFIG_SHEET_URL")
+    # lstrip the BOM too — a PowerShell-piped secret may carry a leading ﻿.
+    sheet_url = (os.environ.get("PLANILHAS_CONFIG_SHEET_URL") or "").lstrip("﻿").strip()
     if not sheet_url:
         _log("[ERRO] PLANILHAS_CONFIG_SHEET_URL não definido. Abortando.")
         return 2
