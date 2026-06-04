@@ -226,23 +226,56 @@ class RedTrackAPI:
         by campaign_id. Returns [{date, cost, convtype*, ...}, ...] for this
         single campaign, one row per day in the range.
         """
-        try:
-            url = f"{self.base_url}/report"
-            params = {
-                'api_key': self.api_key,
-                'date_from': date_start,
-                'date_to': date_end,
-                'group': 'campaign,date',
-                'limit': 5000,
-            }
-            response = requests.get(url, params=params, timeout=60)
-            response.raise_for_status()
-            data = response.json()
-            rows = data if isinstance(data, list) else data.get('items', [])
-            return [r for r in rows if r.get('campaign_id') == campaign_id]
-        except Exception as e:
-            print(f"❌ Error fetching daily report for campaign {campaign_id}: {e}")
-            return []
+        import time
+
+        url = f"{self.base_url}/report"
+        params = {
+            'api_key': self.api_key,
+            'date_from': date_start,
+            'date_to': date_end,
+            'group': 'campaign,date',
+            'limit': 5000,
+        }
+        # Retry on rate-limit (429) and transient server/network errors, with
+        # exponential backoff. RedTrack throttles when calls come in bursts.
+        max_attempts = 4
+        retryable_status = {429, 500, 502, 503, 504}
+        last_err = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.get(url, params=params, timeout=60)
+                if response.status_code in retryable_status:
+                    raise requests.HTTPError(
+                        f"{response.status_code} {response.reason}", response=response
+                    )
+                response.raise_for_status()
+                data = response.json()
+                rows = data if isinstance(data, list) else data.get('items', [])
+                return [r for r in rows if r.get('campaign_id') == campaign_id]
+            except Exception as e:
+                last_err = e
+                resp = getattr(e, "response", None)
+                status = getattr(resp, "status_code", None)
+                # Retry on throttling/5xx, or on a network error (no response).
+                retryable = status in retryable_status or (
+                    isinstance(e, requests.RequestException) and status is None
+                )
+                if attempt < max_attempts and retryable:
+                    retry_after = None
+                    if resp is not None:
+                        ra = resp.headers.get("Retry-After")
+                        if ra and str(ra).strip().isdigit():
+                            retry_after = float(ra)
+                    wait = retry_after if retry_after is not None else 2.0 * (2 ** (attempt - 1))
+                    print(
+                        f"⏳ RedTrack {status or 'erro de rede'} na campanha {campaign_id}; "
+                        f"tentativa {attempt}/{max_attempts}, aguardando {wait:.0f}s..."
+                    )
+                    time.sleep(wait)
+                    continue
+                break
+        print(f"❌ Error fetching daily report for campaign {campaign_id}: {last_err}")
+        return []
 
 
 class ExcelManager:
