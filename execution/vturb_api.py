@@ -14,12 +14,19 @@ happens in `fill_planilha_by_dates.aggregate_metrics_by_date`.
 
 from __future__ import annotations
 
+import time
 from typing import Dict, List
 
 import requests
 
 BASE_URL = "https://analytics.vturb.net"
 API_VERSION = "v1"
+
+# Retry transient failures (429 rate limit, 5xx, network) with exponential
+# backoff. Without this a single 429 mid-backfill would surface as a swallowed
+# error and silently write 0 to the pitch-audience cell.
+_MAX_RETRIES = 4
+_BACKOFF_BASE_SEC = 2
 
 # VTurb daily stats fields we expose to the planilha. Keys are what we write
 # into SUPPORTED_METRICS (prefixed `vturb_`); values are the raw keys returned
@@ -62,15 +69,39 @@ class VTurbAPI:
             "Content-Type": "application/json",
         })
 
+    def _request(self, method: str, path: str, body: Dict = None) -> Dict:
+        url = f"{BASE_URL}{path}"
+        last_exc = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                if method == "POST":
+                    r = self.session.post(url, json=body, timeout=60)
+                else:
+                    r = self.session.get(url, timeout=60)
+                # Retry on rate limit / server errors.
+                if r.status_code == 429 or r.status_code >= 500:
+                    if attempt < _MAX_RETRIES - 1:
+                        retry_after = r.headers.get("Retry-After")
+                        wait = float(retry_after) if retry_after else _BACKOFF_BASE_SEC * (2 ** attempt)
+                        time.sleep(wait)
+                        continue
+                r.raise_for_status()
+                return r.json()
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_BACKOFF_BASE_SEC * (2 ** attempt))
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        raise RuntimeError(f"VTurb request failed after {_MAX_RETRIES} attempts: {method} {path}")
+
     def _post(self, path: str, body: Dict) -> Dict:
-        r = self.session.post(f"{BASE_URL}{path}", json=body, timeout=60)
-        r.raise_for_status()
-        return r.json()
+        return self._request("POST", path, body)
 
     def _get(self, path: str) -> Dict:
-        r = self.session.get(f"{BASE_URL}{path}", timeout=60)
-        r.raise_for_status()
-        return r.json()
+        return self._request("GET", path)
 
     def list_players(self) -> List[Dict]:
         """Return [{'id', 'name', 'pitch_time', 'duration', 'created_at'}, ...]."""
