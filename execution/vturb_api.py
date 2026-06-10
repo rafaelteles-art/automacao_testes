@@ -43,11 +43,18 @@ VTURB_METRIC_FIELDS: Dict[str, str] = {
 }
 
 
+# VTurb stores events in UTC. Without a timezone the API buckets by UTC days,
+# which inflates/shifts each day relative to the dashboard. The account operates
+# in BRT, so we pin every call to America/Sao_Paulo to match the dashboard.
+DEFAULT_TIMEZONE = "America/Sao_Paulo"
+
+
 class VTurbAPI:
-    def __init__(self, token: str):
+    def __init__(self, token: str, timezone: str = DEFAULT_TIMEZONE):
         if not token:
             raise ValueError("VTurb token is required")
         self.token = token
+        self.timezone = timezone
         self.session = requests.Session()
         self.session.headers.update({
             "X-Api-Token": token,
@@ -86,9 +93,48 @@ class VTurbAPI:
             "player_id": player_id,
             "start_date": _pad_start(date_start),
             "end_date": _pad_end(date_end),
+            "timezone": self.timezone,
         }
         data = self._post("/sessions/stats_by_day", body)
         return data if isinstance(data, list) else []
+
+    def pitch_audience_for_day(
+        self,
+        player_id: str,
+        pitch_time: int,
+        video_duration: int,
+        day: str,
+    ) -> int:
+        """Absolute audience that reached the pitch on a single day.
+
+        This is the dashboard's "Audiência do Pitch". The raw
+        `total_over_pitch` field from /sessions/stats_by_day is broken
+        (over_pitch_rate is hardcoded 100, value can exceed total views), so we
+        instead read the retention curve from /times/user_engagement and sum the
+        users who reached at least `pitch_time` seconds.
+
+        `grouped_timed` is a drop-off histogram: [{timed, total_users}, ...]
+        where total_users is how many users stopped at that second. The audience
+        still watching at second X is therefore the sum of total_users for all
+        timed >= X. Verified against the dashboard (player ...c153691, 2026-06-08:
+        sum(timed>=2300) == 360, matching "Audiência do Pitch").
+        """
+        if not pitch_time or pitch_time <= 0 or not video_duration:
+            return 0
+        body = {
+            "player_id": player_id,
+            "start_date": _pad_start(day),
+            "end_date": _pad_end(day),
+            "timezone": self.timezone,
+            "video_duration": video_duration,
+        }
+        data = self._post("/times/user_engagement", body)
+        grouped = (data or {}).get("grouped_timed") or []
+        return sum(
+            int(p.get("total_users", 0) or 0)
+            for p in grouped
+            if (p.get("timed") or 0) >= pitch_time
+        )
 
 
 def _pad_start(s: str) -> str:

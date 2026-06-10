@@ -90,6 +90,10 @@ SUPPORTED_METRICS: List[str] = [
     # VTurb (vide vturb_api.VTURB_METRIC_FIELDS). Somáveis entre variantes de
     # A/B test, exceto as _rate (recomputadas via numerador/denominador).
     *VTURB_METRIC_FIELDS.keys(),
+    # Audiência absoluta que chegou ao pitch (a "Audiência do Pitch" do
+    # dashboard). NÃO vem de stats_by_day — é derivada da curva de retenção
+    # em vturb_api.pitch_audience_for_day(). Somável entre variantes de A/B test.
+    "vturb_pitch_audience",
 ]
 
 
@@ -167,10 +171,21 @@ def aggregate_metrics_by_date(
         # Accumulators for engagement_rate weighted average (by total_viewed).
         engagement_num: Dict[str, float] = {}
         engagement_den: Dict[str, float] = {}
+        # Per-player pitch_time/duration, needed to derive the pitch audience
+        # from the retention curve. One /players/list call, reused for all.
+        player_meta: Dict[str, Dict] = {}
+        try:
+            for p in vturb_api.list_players():
+                player_meta[p.get("id")] = p
+        except Exception:
+            player_meta = {}
         for pid in vturb_player_ids:
             if progress:
                 progress(f"Buscando VTurb /sessions/stats_by_day do player {pid}...")
             rows = vturb_api.daily_stats_for_player(pid, date_start, date_end)
+            meta = player_meta.get(pid, {})
+            pitch_time = int(meta.get("pitch_time") or 0)
+            video_duration = int(meta.get("duration") or 0)
             for row in rows:
                 day_raw = row.get("date_key") or row.get("day")
                 if not day_raw:
@@ -193,6 +208,16 @@ def aggregate_metrics_by_date(
                     engagement_den[day] = engagement_den.get(day, 0.0) + viewed
                 except (TypeError, ValueError):
                     pass
+                # Pitch audience: only worth a call on days that had plays.
+                # Summed across A/B-test variants into the same day bucket.
+                started = float(row.get("total_started", 0) or 0)
+                if started > 0 and pitch_time > 0 and video_duration > 0:
+                    try:
+                        bucket["vturb_pitch_audience"] += vturb_api.pitch_audience_for_day(
+                            pid, pitch_time, video_duration, day
+                        )
+                    except Exception:
+                        pass
 
         # Derive ratios from summed counts (more correct than averaging rates).
         #   play_rate = total_started / total_viewed * 100
