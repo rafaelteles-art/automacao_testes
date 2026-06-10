@@ -73,6 +73,21 @@ On GitHub: Actions → "Daily Dossiê Fill" → Run workflow (optionally set a d
   re-corrected for late-attributed RedTrack conversions. Backfill with `--date`
   if a past day needs refreshing.
 - **API cost:** one RedTrack call per campaign per Dossiê (single-day range).
+  VTurb adds one `/sessions/stats_by_day` call per player, plus one
+  `/times/user_engagement` call per player **per day with plays** (pitch audience).
+- **VTurb timezone is mandatory.** `VTurbAPI` pins every request to
+  `America/Sao_Paulo`. Without it the API buckets by UTC, inflating/shifting daily
+  views/plays vs the dashboard (e.g. 2793 vs 2388 views for one day). Default is
+  `Etc/UTC` — never rely on it.
+- **"Audiência do Pitch" ≠ `total_over_pitch`.** The `total_over_pitch` /
+  `over_pitch_rate` fields from `/sessions/stats_by_day` are broken
+  (`over_pitch_rate` hardcoded 100, `under_pitch` 0, value can exceed total views).
+  The real pitch audience = sum of `total_users` with `timed >= pitch_time` from
+  the `/times/user_engagement` retention curve (a drop-off histogram). Implemented
+  in `vturb_api.pitch_audience_for_day()`; exposed as metric `vturb_pitch_audience`.
+  The config-Sheet label **PITCH** maps to `vturb_pitch_audience` (was wrongly
+  `vturb_over_pitch`). `pitch_time`/`duration` come from `/players/list`; if
+  `pitch_time` is 0 the audience is 0 (player has no pitch configured).
 
 ---
 
