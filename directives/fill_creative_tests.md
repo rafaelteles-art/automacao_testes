@@ -60,6 +60,21 @@ python execution/fill_creative_tests.py \
 3. Preencher a **Coluna B** do Excel com os nomes dos anúncios.
 4. Clicar em **"✍️ Preencher Coluna TC"** na seção "Preencher Planilha" da página.
 
+## Colunas de Métricas (seção TESTES)
+
+Preenchidas apenas quando a Coluna M contém `TESTE`:
+
+| Coluna | Métrica | Fonte |
+|---|---|---|
+| E / F | Hook Rate / Body75 | Facebook insights |
+| G / H / I | CPM / CTR / CPC | Facebook insights |
+| J | Gasto | RedTrack (`cost`) |
+| K | Vendas | RedTrack (`convtype2`) |
+| L | CPA | Calculado (gasto / vendas) |
+| N | Initiate Checkout (IC) | RedTrack (`convtype1`) |
+
+> O mapeamento `convtype1` = IC vem de `label_map_store.py` (`"IC": "convtype1"`).
+
 ## Notas e Edge Cases
 
 - Se um anúncio não for encontrado na API, a Coluna A fica em branco e o nome do anúncio aparece no aviso de "Não encontrados".

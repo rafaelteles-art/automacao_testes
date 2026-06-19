@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 fill_creative_tests.py
-Fills Column A (TC group label) and performance metrics (Hook, Body75, CPM, CTR, CPC, Gasto)
-of the '032026' sheet conditionally based on User Column M (Status).
+Fills Column A (TC group label) and performance metrics (Hook, Body75, CPM, CTR,
+CPC, Gasto, Vendas, CPA, Initiate Checkout) of the '032026' sheet conditionally
+based on User Column M (Status).
 
 Logic:
 1. Fetches USD->BRL quote from AwesomeAPI.
@@ -140,7 +141,7 @@ def fetch_fb_insights_for_campaign(c_id, since, until, fb_token):
 
 def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
     if not rt_token or not ad_name_lower:
-        return {"vendas": 0, "cost": 0.0, "roas": 0.0}
+        return {"vendas": 0, "cost": 0.0, "roas": 0.0, "ic": 0}
     
     import time
     
@@ -168,45 +169,46 @@ def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
         return [], False
 
     def fetch_and_sum(group_name):
-        v = 0.0; c = 0.0; ro = 0.0
+        v = 0.0; c = 0.0; ro = 0.0; ic = 0.0
         page = 1
         while page <= 5:
             rt_data, success = internal_fetch(page, group_name)
             if not success or not rt_data: break
-            
+
             for r_row in rt_data:
                 rt_val = str(r_row.get(group_name, '')).strip().lower()
                 if not rt_val: continue
-                
+
                 is_match = False
                 if rt_val == ad_name_lower:
                     is_match = True
                 elif rt_val == ad_name_lower.split(" - ")[0].split(" ")[0]:
                     is_match = True
-                    
+
                 if is_match:
                     v += float(r_row.get('convtype2', 0))
+                    ic += float(r_row.get('convtype1', 0))  # Initiate Checkout (IC)
                     c += float(r_row.get('cost', 0))
                     roas_val = float(r_row.get('roas', 0))
                     if roas_val != 0: ro = roas_val
-            
+
             if len(rt_data) < 1000: break
             page += 1
-        return v, c, ro
+        return v, c, ro, ic
 
     # Try rt_ad first (default correct setup)
-    vendas, cost, roas = fetch_and_sum("rt_ad")
-    
+    vendas, cost, roas, ic = fetch_and_sum("rt_ad")
+
     # Fallback to sub4 if media buyer populated the wrong parameter (ex: LT1192)
     if vendas == 0 and cost == 0:
-        vendas, cost, roas = fetch_and_sum("sub4")
-        
+        vendas, cost, roas, ic = fetch_and_sum("sub4")
+
     # Double check API glitch
     if vendas == 0 and cost == 0:
         time.sleep(3)
-        vendas, cost, roas = fetch_and_sum("rt_ad")
+        vendas, cost, roas, ic = fetch_and_sum("rt_ad")
 
-    return {"vendas": vendas, "cost": cost, "roas": roas}
+    return {"vendas": vendas, "cost": cost, "roas": roas, "ic": ic}
 
 def fill_creative_tests(
     account_ids: list, 
@@ -412,7 +414,8 @@ def fill_creative_tests(
             rt = fetch_rt_for_ad(search_term, row_date_start, date_end, redtrack_token)
             vendas = rt["vendas"]
             rt_cost_brl = rt["cost"]
-            
+            ic = rt["ic"]  # Initiate Checkout (RedTrack convtype1)
+
             # Queue metric updates
             cells_to_update.append(gspread.Cell(row=row_idx, col=5, value=fin["hook_rate"]))
             cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=fin["body_rate"]))
@@ -420,8 +423,9 @@ def fill_creative_tests(
             cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=fin["ctr"]))
             cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=round(cpc_brl, 2)))
             cells_to_update.append(gspread.Cell(row=row_idx, col=10, value=round(rt_cost_brl, 2))) # Pull Gasto from RedTrack
-            
+
             cells_to_update.append(gspread.Cell(row=row_idx, col=11, value=vendas))
+            cells_to_update.append(gspread.Cell(row=row_idx, col=14, value=ic))  # Col N - Initiate Checkout
             
             cpa = 0
             if vendas > 0:
