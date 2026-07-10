@@ -44,10 +44,10 @@ def get_gspread_client():
             else:
                 secret_info = dict(secret_info)
             creds = Credentials.from_service_account_info(secret_info, scopes=scopes)
-            return gspread.authorize(creds)
+            return gspread.authorize(creds, http_client=gspread.BackOffHTTPClient)
         elif os.path.exists("credentials.json"):
             creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-            return gspread.authorize(creds)
+            return gspread.authorize(creds, http_client=gspread.BackOffHTTPClient)
     except Exception as e:
         import traceback
         st.error(f"Erro ao carregar credenciais: {e} | {traceback.format_exc()}")

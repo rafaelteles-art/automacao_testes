@@ -72,7 +72,7 @@ def _build_client() -> gspread.Client:
     with open(cred_path, "r", encoding="utf-8-sig") as f:
         info = json.load(f)
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-    return gspread.authorize(creds)
+    return gspread.authorize(creds, http_client=gspread.BackOffHTTPClient)
 
 
 def _yesterday_brt() -> date:
