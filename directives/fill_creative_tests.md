@@ -77,6 +77,7 @@ Preenchidas apenas quando a Coluna M contém `TESTE`:
 
 ## Notas e Edge Cases
 
+- **Variações do mesmo anúncio (ex: BM108.1 / BM108.2 / BM108.3) devem ter métricas do Facebook diferentes.** As métricas do FB (Hook, Body75, CPM, CTR, CPC) DEVEM ser puxadas em `level='ad'` e casadas pelo `ad_name` exato da variação (`fetch_fb_ad_insights_for_campaign` + `select_ad_metrics`). Já foi um bug: puxar em `level='campaign'` retornava o agregado da campanha, então todas as variações que compartilham a mesma campanha eram preenchidas idênticas (só o Gasto/Vendas do RedTrack, que casa por `rt_ad` exato, variava). Regressão coberta por `execution/test_variation_metrics.py`.
 - Se um anúncio não for encontrado na API, a Coluna A fica em branco e o nome do anúncio aparece no aviso de "Não encontrados".
 - Se o Excel estiver aberto no Excel ao rodar o script, ele vai falhar ao salvar. Feche o arquivo antes.
 - O período de datas deve cobrir quando os anúncios estiveram ativos.

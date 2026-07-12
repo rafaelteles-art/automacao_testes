@@ -90,54 +90,87 @@ def parse_excel_date(cell_value, default_date: str) -> str:
             return f"20{match_short.group(3)}-{match_short.group(2)}-{match_short.group(1)}"
     return default_date
 
-def fetch_fb_insights_for_campaign(c_id, since, until, fb_token):
+def fetch_fb_ad_insights_for_campaign(c_id, since, until, fb_token):
+    """Return a list of AD-level insight dicts for a campaign.
+
+    Campaign-level insights return one aggregate row, so every ad variation
+    that shares a campaign (BM108.1/.2/.3) would get identical Hook/Body/CPM/
+    CTR/CPC. Pulling at level='ad' keeps each variation separate; the caller
+    then selects the ad matching the row's exact name via select_ad_metrics().
+    """
     url = f"https://graph.facebook.com/v19.0/{c_id}/insights"
     params = {
         'access_token': fb_token,
-        'fields': 'campaign_id,impressions,cpc,cpm,ctr,spend,actions,video_p75_watched_actions',
-        'level': 'campaign',
-        'time_range': f'{{"since":"{since}","until":"{until}"}}'
+        'fields': 'ad_id,ad_name,impressions,cpc,cpm,ctr,spend,actions,video_p75_watched_actions',
+        'level': 'ad',
+        'time_range': f'{{"since":"{since}","until":"{until}"}}',
+        'limit': 200,
     }
+    out = []
     import time
-    for _ in range(3):
-        r = requests.get(url, params=params, timeout=30)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get('data'):
-                row = data['data'][0]
-                imps = float(row.get("impressions", 0))
-                # Hook Rate
-                actions = row.get('actions', [])
-                video_3s_views = 0
-                for act in actions:
-                    if act.get('action_type') == 'video_view':
-                        video_3s_views = float(act.get('value', 0))
-                        break
-                # Hold Rate
-                video_p75_actions = row.get('video_p75_watched_actions', [])
-                p75 = float(video_p75_actions[0].get('value', 0)) if video_p75_actions else 0
-                
-                return {
-                    "spend": float(row.get("spend", 0.0)),
-                    "cpm": float(row.get("cpm", 0.0)),
-                    "cpc": float(row.get("cpc", 0.0)),
-                    "ctr": (float(row.get("ctr", 0.0)) / 100),
-                    "hook_rate": (video_3s_views / imps) if imps > 0 else 0,
-                    "body_rate": (p75 / imps) if imps > 0 else 0,
-                    "impressions": imps
-                }
+    while url:
+        got_page = False
+        for _ in range(3):
+            r = requests.get(url, params=params, timeout=30)
+            if r.status_code == 200:
+                data = r.json()
+                for row in data.get('data', []):
+                    imps = float(row.get("impressions", 0) or 0)
+                    # Hook Rate (3s video views / impressions)
+                    video_3s_views = 0
+                    for act in row.get('actions', []) or []:
+                        if act.get('action_type') == 'video_view':
+                            video_3s_views = float(act.get('value', 0) or 0)
+                            break
+                    # Body/Hold Rate (75% watched / impressions)
+                    p75_actions = row.get('video_p75_watched_actions', []) or []
+                    p75 = float(p75_actions[0].get('value', 0) or 0) if p75_actions else 0
+                    out.append({
+                        "ad_id": row.get("ad_id", ""),
+                        "ad_name": row.get("ad_name", ""),
+                        "spend": float(row.get("spend", 0.0) or 0.0),
+                        "cpm": float(row.get("cpm", 0.0) or 0.0),
+                        "cpc": float(row.get("cpc", 0.0) or 0.0),
+                        "ctr": (float(row.get("ctr", 0.0) or 0.0) / 100),
+                        "hook_rate": (video_3s_views / imps) if imps > 0 else 0,
+                        "body_rate": (p75 / imps) if imps > 0 else 0,
+                        "impressions": imps,
+                    })
+                url = (data.get('paging', {}) or {}).get('next')
+                params = {}  # 'next' URL already carries params
+                got_page = True
+                break
+            elif r.status_code == 429 or r.status_code >= 500:
+                time.sleep(2)
+                continue
+            else:
+                url = None
+                break
+        if not got_page:
             break
-        elif r.status_code == 429 or r.status_code >= 500:
-            time.sleep(2)
-            continue
-        else:
-            break
+    return out
 
-    return {
-        "spend": 0.0, "cpm": 0.0, "cpc": 0.0,
-        "ctr": 0.0, "hook_rate": 0.0, "body_rate": 0.0,
-        "impressions": 0.0
-    }
+def select_ad_metrics(ad_rows, search_term):
+    """Pick the ad matching this row's exact variation name.
+
+    Priority: exact ad_name match, then a word-boundary 'contains' match
+    (so 'BM108.1' won't match 'BM108.10'). Ties break on impressions.
+    Returns the metric dict, or None if nothing matches.
+    """
+    st = str(search_term or "").strip().lower()
+    if not st:
+        return None
+
+    exact = [m for m in ad_rows if str(m.get("ad_name", "")).strip().lower() == st]
+    if exact:
+        return max(exact, key=lambda m: m.get("impressions", 0))
+
+    pattern = r'(?<![a-zA-Z0-9_])' + re.escape(st) + r'(?![a-zA-Z0-9_])'
+    contains = [m for m in ad_rows if re.search(pattern, str(m.get("ad_name", "")).lower())]
+    if contains:
+        return max(contains, key=lambda m: m.get("impressions", 0))
+
+    return None
 
 def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
     if not rt_token or not ad_name_lower:
@@ -387,24 +420,18 @@ def fill_creative_tests(
             cell_d_val = row_data[3] if len(row_data) > 3 else ""
             col_d_empty = not cell_d_val or str(cell_d_val).strip() == ""
             
-            best_fin = None
-            max_imps = -1
-            max_spend = -1
-            
-            # Check all matched campaigns and pick the one with most impressions (or spend)
+            # Gather AD-LEVEL insights across all matched campaigns, then pick
+            # the ad matching THIS row's exact variation name. Fetching at
+            # campaign level returned the same aggregate for every variation
+            # sharing a campaign (BM108.1/.2/.3 all filled identically).
+            ad_rows = []
             for info in matched_infos:
-                fin = fetch_fb_insights_for_campaign(info["id"], row_date_start, date_end, token)
-                imps = fin.get("impressions", 0)
-                spend_fb = fin.get("spend", 0)
-                
-                if imps > max_imps or (imps == max_imps and spend_fb > max_spend):
-                    max_imps = imps
-                    max_spend = spend_fb
-                    best_fin = fin
-                    
+                ad_rows.extend(fetch_fb_ad_insights_for_campaign(info["id"], row_date_start, date_end, token))
+
+            best_fin = select_ad_metrics(ad_rows, search_term)
             if not best_fin:
                 best_fin = {"spend": 0.0, "cpm": 0.0, "cpc": 0.0, "ctr": 0.0, "hook_rate": 0.0, "body_rate": 0.0, "impressions": 0.0}
-            
+
             fin = best_fin
             
             cpc_brl = fin["cpc"] * usd_to_brl
