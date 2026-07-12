@@ -90,6 +90,34 @@ def parse_excel_date(cell_value, default_date: str) -> str:
             return f"20{match_short.group(3)}-{match_short.group(2)}-{match_short.group(1)}"
     return default_date
 
+def derive_auto_date_start(all_values, data_start, fallback):
+    """Oldest 'Início' among rows still in TESTE, read from the sheet itself.
+
+    Scans Col C (TESTES section, status in Col M) and Col P (PRÉ-ESCALA
+    section, status in Col V). Returns the earliest date as YYYY-MM-DD, or
+    `fallback` when no TESTE row has a parseable date. This makes the fill
+    independent of the date the user picked in the UI — an old still-running
+    test is never cut off by a late date_start.
+    """
+    dates = []
+    for i in range(data_start - 1, len(all_values)):
+        row = all_values[i]
+        # TESTES section: Col B name + Col M status -> date in Col C
+        name = row[1] if len(row) > 1 else ""
+        status = row[12] if len(row) > 12 else ""
+        if name and str(name).strip() and "TESTE" in str(status).strip().upper():
+            d = parse_excel_date(row[2] if len(row) > 2 else "", "")
+            if d:
+                dates.append(d)
+        # PRÉ-ESCALA section: Col O name + Col V status -> date in Col P
+        name_pe = row[14] if len(row) > 14 else ""
+        status_pe = row[21] if len(row) > 21 else ""
+        if name_pe and str(name_pe).strip() and "TESTE" in str(status_pe).strip().upper():
+            d = parse_excel_date(row[15] if len(row) > 15 else "", "")
+            if d:
+                dates.append(d)
+    return min(dates) if dates else fallback  # YYYY-MM-DD sorts lexicographically
+
 def _parse_ad_insight_row(row):
     """Convert one FB ad-level insight row into our metric dict."""
     imps = float(row.get("impressions", 0) or 0)
@@ -399,6 +427,14 @@ def fill_creative_tests(
             data_start = i + 2  # data begins on the row after the header
             break
 
+    # The overall start date comes from the SHEET, not the UI: the oldest
+    # 'Início' among rows still in TESTE. Rows without a parseable date use
+    # this derived date; the user-picked date_start is only the last resort
+    # when no TESTE row has a date at all.
+    auto_date_start = derive_auto_date_start(all_values, data_start, date_start)
+    if progress_callback:
+        progress_callback(f"Data inicial detectada na planilha: {auto_date_start} (teste em aberto mais antigo).")
+
     # 3. One FB insights sweep per DISTINCT date range used by the TESTE rows.
     #    Insights only return ads that delivered in the range, so this scales
     #    with active ads instead of the 300k+ full /ads catalog (previous
@@ -413,7 +449,7 @@ def fill_creative_tests(
         if "TESTE" not in str(status_val).strip().upper():
             continue
         date_col_c = row_data[2] if len(row_data) > 2 else ""
-        ranges.add(parse_excel_date(date_col_c, date_start))
+        ranges.add(parse_excel_date(date_col_c, auto_date_start))
 
     fb_rows_by_range = {}
     all_insight_rows = []
@@ -517,7 +553,7 @@ def fill_creative_tests(
         if "TESTE" in current_status:
             # Get specific start date from Col C (column 3)
             date_col_c = row_data[2] if len(row_data) > 2 else ""
-            row_date_start = parse_excel_date(date_col_c, date_start)
+            row_date_start = parse_excel_date(date_col_c, auto_date_start)
 
             # Current Col D value (data fim) — only write if empty so manual
             # entries and prior verdicts are preserved across re-runs.
@@ -615,7 +651,7 @@ def fill_creative_tests(
         
         # Determine Row Date - Col P uses column 16
         date_col_p = row_data[15] if len(row_data) > 15 else ""
-        row_date_pe = parse_excel_date(date_col_p, date_start)
+        row_date_pe = parse_excel_date(date_col_p, auto_date_start)
         
         # RedTrack Fetch
         rt = fetch_rt_for_ad(search_pe, row_date_pe, date_end, redtrack_token)

@@ -347,7 +347,8 @@ if g_url:
             sheet_names = [ws.title for ws in worksheets]
         
         selected_sheet = st.selectbox("📋 Selecione a Aba para preencher", sheet_names)
-        
+        st.caption("📅 A data inicial é detectada automaticamente na planilha (o teste em aberto mais antigo). A data do painel lateral só é usada se nenhuma linha em TESTE tiver data de início.")
+
         if st.button("✍️ Iniciar Preenchimento na Nuvem", type="primary"):
             from fill_creative_tests import fill_creative_tests
             

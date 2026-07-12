@@ -101,10 +101,37 @@ def test_rt_report_cache_reuses_pull():
         fct._rt_report_cache.clear()
 
 
+def test_derive_auto_date_start():
+    def row(n=26, **cols):
+        r = [""] * n
+        for idx, v in cols.items():
+            r[int(idx)] = v
+        return r
+
+    values = [
+        row(),  # R1 section header
+        row(),  # R2 column header
+        # TESTES: name in B(1), date in C(2), status in M(12)
+        row(**{"1": "BDM05", "2": "18/04/2026", "12": "TESTE"}),
+        row(**{"1": "BM188", "2": "10/07/2026", "12": "TESTE"}),
+        row(**{"1": "BM50", "2": "01/03/2026", "12": "VALIDADO"}),   # not TESTE -> ignored
+        # PRÉ-ESCALA: name in O(14), date in P(15), status in V(21)
+        row(**{"14": "BM82", "15": "02/06/2026", "21": "TESTE"}),
+    ]
+    got = fct.derive_auto_date_start(values, 3, "2026-07-01")
+    assert got == "2026-04-18", got  # oldest TESTE date wins (VALIDADO ignored)
+
+    # No TESTE row with a date -> fallback
+    values2 = [row(), row(), row(**{"1": "BM1", "12": "TESTE"})]
+    assert fct.derive_auto_date_start(values2, 3, "2026-07-01") == "2026-07-01"
+    print("PASS: auto start date = oldest TESTE date; fallback when none")
+
+
 if __name__ == "__main__":
     test_exact_ad_name_match()
     test_boundary_not_greedy()
     test_variation_exact_then_base()
     test_build_ad_index_from_insight_rows()
     test_rt_report_cache_reuses_pull()
+    test_derive_auto_date_start()
     print("\nAll tests passed.")
