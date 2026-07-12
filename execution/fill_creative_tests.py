@@ -172,6 +172,106 @@ def select_ad_metrics(ad_rows, search_term):
 
     return None
 
+def fetch_all_ads(account_ids, token, progress_callback=None):
+    """Build an index of Facebook ADS keyed by ad name.
+
+    The test codes (BM188, BM108.1, ...) live in the ad NAME, not the campaign
+    name, so indexing campaigns alone misses them. Returns:
+        ad_index: {ad_name_lower: [{ad_id, ad_name, campaign_id, campaign_name}]}
+    """
+    import time
+    ad_index = {}
+    total = 0
+    for account_id in account_ids:
+        acc_raw = account_id.replace("act_", "")
+        url = f"https://graph.facebook.com/v19.0/act_{acc_raw}/ads"
+        params = {"access_token": token, "fields": "id,name,campaign{id,name}", "limit": 500}
+        while url:
+            success = False
+            last_status = None
+            last_body = None
+            for retry in range(6):
+                r = requests.get(url, params=params, timeout=60)
+                last_status = r.status_code
+                last_body = r.text[:500]
+                if r.status_code == 200:
+                    success = True
+                    break
+                is_rate_limit = False
+                try:
+                    err = r.json().get("error", {}) or {}
+                    if err.get("code") in (17, 4, 32, 613) or err.get("is_transient"):
+                        is_rate_limit = True
+                except Exception:
+                    pass
+                if r.status_code == 429 or r.status_code >= 500 or is_rate_limit:
+                    sleep_s = min(2 ** retry, 60)
+                    if progress_callback:
+                        progress_callback(f"⏳ FB rate limit ao puxar anúncios (conta {acc_raw}, status {r.status_code}). Retry {retry+1}/6 em {sleep_s}s...")
+                    time.sleep(sleep_s)
+                    continue
+                else:
+                    break
+
+            if not success:
+                msg = f"⚠️ Falha ao puxar anúncios da conta {acc_raw} (status {last_status}): {last_body}"
+                if progress_callback: progress_callback(msg)
+                raise RuntimeError(msg)
+
+            data = r.json()
+            page_data = data.get("data", [])
+            for ad in page_data:
+                name = str(ad.get("name", "") or "").strip()
+                if not name:
+                    continue
+                camp = ad.get("campaign", {}) or {}
+                ad_index.setdefault(name.lower(), []).append({
+                    "ad_id": ad.get("id"),
+                    "ad_name": name,
+                    "campaign_id": camp.get("id"),
+                    "campaign_name": camp.get("name", ""),
+                })
+                total += 1
+            if progress_callback and total:
+                progress_callback(f"Catálogo de anúncios: {total} anúncios indexados...")
+            paging = data.get("paging", {})
+            url = paging.get("next")
+            params = {}
+    return ad_index
+
+def match_ads(ad_index, search_term):
+    """Return the candidate FB ads for a sheet ad code.
+
+    Exact ad-name match wins; otherwise a word-boundary match on the exact
+    term, then on the base term (BM108 for BM108.1). Mirrors the campaign
+    matcher's scoring so variations resolve to their own ad when present.
+    """
+    st = str(search_term or "").strip().lower()
+    if not st:
+        return []
+    if st in ad_index:
+        return list(ad_index[st])
+
+    base = st.split('.')[0] if '.' in st else st
+    pat_exact = r'(?<![a-zA-Z0-9_\.])' + re.escape(st) + r'(?![a-zA-Z0-9_\.])'
+    pat_base = r'(?<![a-zA-Z0-9_\.])' + re.escape(base) + r'(?![a-zA-Z0-9_\.])'
+
+    best_score = 0
+    hits = []
+    for key, ads in ad_index.items():
+        score = 0
+        if re.search(pat_exact, key):
+            score = 2
+        elif base != st and re.search(pat_base, key):
+            score = 1
+        if score > 0:
+            if score > best_score:
+                best_score = score
+                hits = list(ads)
+            elif score == best_score:
+                hits.extend(ads)
+    return hits
+
 def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
     if not rt_token or not ad_name_lower:
         return {"vendas": 0, "cost": 0.0, "roas": 0.0, "ic": 0}
@@ -266,69 +366,34 @@ def fill_creative_tests(
     except Exception as e:
         if progress_callback: progress_callback(f"⚠️ Erro ao obter dólar. Usando R$ 5.00.")
 
-    # 2. Fetch all campaigns to build catalog
-    if progress_callback: progress_callback("Construindo catálogo raiz de Campanhas...")
+    # 2. Fetch all ADS to build the catalog. Test codes live in the ad name
+    #    (BM188, BM108.1, ...), so we index ads by name. The campaign-name index
+    #    is derived from the same sweep as a fallback for older ads whose code
+    #    only appears in the campaign name.
+    if progress_callback: progress_callback("Construindo catálogo de Anúncios...")
 
-    all_campaigns = []
-    for account_id in account_ids:
-        acc_raw = account_id.replace("act_", "")
-        url = f"https://graph.facebook.com/v19.0/act_{acc_raw}/campaigns"
-        params = {"access_token": token, "fields": "id,name", "limit": 500}
-        import time
-        while url:
-            success = False
-            last_status = None
-            last_body = None
-            for retry in range(6):
-                r = requests.get(url, params=params, timeout=30)
-                last_status = r.status_code
-                last_body = r.text[:500]
-                if r.status_code == 200:
-                    success = True
-                    break
-                # Detect FB rate limit codes in body (error.code 17, 4, 32, 613)
-                is_rate_limit = False
-                try:
-                    err = r.json().get("error", {}) or {}
-                    if err.get("code") in (17, 4, 32, 613) or err.get("is_transient"):
-                        is_rate_limit = True
-                except Exception:
-                    pass
-                if r.status_code == 429 or r.status_code >= 500 or is_rate_limit:
-                    sleep_s = min(2 ** retry, 60)
-                    if progress_callback:
-                        progress_callback(f"⏳ FB rate limit (conta {acc_raw}, status {r.status_code}). Retry {retry+1}/6 em {sleep_s}s...")
-                    time.sleep(sleep_s)
-                    continue
-                else:
-                    break
-
-            if not success:
-                msg = f"⚠️ Falha ao puxar campanhas da conta {acc_raw} (status {last_status}): {last_body}"
-                if progress_callback: progress_callback(msg)
-                raise RuntimeError(msg)
-                
-            data = r.json()
-            page_data = data.get("data", [])
-            if not page_data: break
-            all_campaigns.extend(page_data)
-            paging = data.get("paging", {})
-            url = paging.get("next")
-            params = {}
+    ad_index = fetch_all_ads(account_ids, token, progress_callback)
 
     ad_to_campaign = {}
-    for camp in all_campaigns:
-        c_name = camp.get("name", "")
-        c_id = camp.get("id")
-        if c_name:
+    seen_camp_per_key = {}
+    for ads in ad_index.values():
+        for ad in ads:
+            c_name = ad.get("campaign_name", "")
+            c_id = ad.get("campaign_id")
+            if not c_name:
+                continue
             extracted = extract_ad_name_from_campaign(c_name)
-            if extracted:
-                key = extracted.strip().lower()
-                if key not in ad_to_campaign: ad_to_campaign[key] = []
-                ad_to_campaign[key].append({"id": c_id, "name": c_name})
+            if not extracted:
+                continue
+            key = extracted.strip().lower()
+            seen = seen_camp_per_key.setdefault(key, set())
+            if c_id in seen:
+                continue
+            seen.add(c_id)
+            ad_to_campaign.setdefault(key, []).append({"id": c_id, "name": c_name})
 
-    if not ad_to_campaign:
-        raise RuntimeError("Nenhuma campanha válida encontrada para as contas selecionadas.")
+    if not ad_index and not ad_to_campaign:
+        raise RuntimeError("Nenhum anúncio encontrado para as contas selecionadas.")
 
     # 3. Read Google Sheets and Process Row-by-Row
     if progress_callback:
@@ -352,8 +417,20 @@ def fill_creative_tests(
     skipped_rows = 0
     not_found = []
 
+    # Detect the header row dynamically (Col A == 'TC', Col B == 'CRIATIVO').
+    # The layout varies per sheet — hardcoding DATA_START_ROW=4 skipped the
+    # first data row on sheets whose header sits on row 2. Fall back to the
+    # constant if the header isn't found.
+    data_start = DATA_START_ROW
+    for i, rv in enumerate(all_values):
+        a = rv[0].strip().upper() if len(rv) > 0 else ""
+        b = rv[1].strip().upper() if len(rv) > 1 else ""
+        if a == "TC" and b == "CRIATIVO":
+            data_start = i + 2  # data begins on the row after the header
+            break
+
     # Process TESTES Completos Section
-    for row_idx in range(DATA_START_ROW, max_row + 1):
+    for row_idx in range(data_start, max_row + 1):
         row_data = all_values[row_idx - 1]
         
         ad_name_value = row_data[1] if len(row_data) > 1 else "" # Col B
@@ -361,55 +438,62 @@ def fill_creative_tests(
             continue
 
         search_term = str(ad_name_value).strip().lower()
+
+        # Primary match: by AD NAME (the test codes live in the ad name).
+        ad_hits = match_ads(ad_index, search_term)
         matched_infos = []
-        
-        if search_term in ad_to_campaign:
-            matched_infos = ad_to_campaign[search_term]
+        if ad_hits:
+            seen_c = set()
+            for a in ad_hits:
+                cid = a.get("campaign_id")
+                if cid and cid not in seen_c:
+                    seen_c.add(cid)
+                    matched_infos.append({"id": cid, "name": a.get("campaign_name", "")})
         else:
-            import re
-            base_term = search_term.split('.')[0] if '.' in search_term else search_term
-            pattern_exact = r'(?<![a-zA-Z0-9_\.])' + re.escape(search_term) + r'(?![a-zA-Z0-9_\.])'
-            pattern_base = r'(?<![a-zA-Z0-9_\.])' + re.escape(base_term) + r'(?![a-zA-Z0-9_\.])'
-            
-            best_score = 0
-            matched_keys = []
-            
-            for key in ad_to_campaign.keys():
-                match_score = 0
-                if re.search(pattern_exact, key):
-                    match_score = 2
-                elif base_term != search_term and re.search(pattern_base, key):
-                    match_score = 1
-                    
-                if match_score > 0:
-                    if match_score > best_score:
-                        best_score = match_score
-                        matched_keys = [key]  # Reset com a melhor prioridade
-                    elif match_score == best_score:
-                        matched_keys.append(key)
-                        
-            matched_infos = []
-            for mk in matched_keys:
-                matched_infos.extend(ad_to_campaign[mk])
+            # Fallback: by CAMPAIGN NAME (older ads whose code is in the campaign name).
+            if search_term in ad_to_campaign:
+                matched_infos = ad_to_campaign[search_term]
+            else:
+                base_term = search_term.split('.')[0] if '.' in search_term else search_term
+                pattern_exact = r'(?<![a-zA-Z0-9_\.])' + re.escape(search_term) + r'(?![a-zA-Z0-9_\.])'
+                pattern_base = r'(?<![a-zA-Z0-9_\.])' + re.escape(base_term) + r'(?![a-zA-Z0-9_\.])'
 
-        if not matched_infos:
-            not_found.append(str(ad_name_value))
-            continue
-            
-        c_name = matched_infos[0]["name"]
+                best_score = 0
+                matched_keys = []
+                for key in ad_to_campaign.keys():
+                    match_score = 0
+                    if re.search(pattern_exact, key):
+                        match_score = 2
+                    elif base_term != search_term and re.search(pattern_base, key):
+                        match_score = 1
+                    if match_score > 0:
+                        if match_score > best_score:
+                            best_score = match_score
+                            matched_keys = [key]  # Reset com a melhor prioridade
+                        elif match_score == best_score:
+                            matched_keys.append(key)
+                for mk in matched_keys:
+                    matched_infos.extend(ad_to_campaign[mk])
 
-        # Col A Logic
-        cell_a_val = row_data[0] if len(row_data) > 0 else ""
-        if not cell_a_val or str(cell_a_val).strip() == "":
-            label = build_col_a_label(c_name)
-            if label:
-                cells_to_update.append(gspread.Cell(row=row_idx, col=1, value=label))
-                filled_a += 1
+        # FB match is OPTIONAL. RedTrack columns (Gasto/Vendas/IC/CPA/verdict)
+        # are filled for any ad that has RedTrack data, even without a matching
+        # FB campaign. Only the FB-only columns (Hook/Body/CPM/CTR/CPC) and the
+        # Col A label require a FB match.
+        c_name = matched_infos[0]["name"] if matched_infos else ""
+
+        # Col A Logic (needs a campaign name carrying a TC token)
+        if c_name:
+            cell_a_val = row_data[0] if len(row_data) > 0 else ""
+            if not cell_a_val or str(cell_a_val).strip() == "":
+                label = build_col_a_label(c_name)
+                if label:
+                    cells_to_update.append(gspread.Cell(row=row_idx, col=1, value=label))
+                    filled_a += 1
 
         # Check Col M Status
         status_val = row_data[12] if len(row_data) > 12 else ""
         current_status = str(status_val).strip().upper()
-        
+
         if "TESTE" in current_status:
             # Get specific start date from Col C (column 3)
             date_col_c = row_data[2] if len(row_data) > 2 else ""
@@ -419,74 +503,69 @@ def fill_creative_tests(
             # entries and prior verdicts are preserved across re-runs.
             cell_d_val = row_data[3] if len(row_data) > 3 else ""
             col_d_empty = not cell_d_val or str(cell_d_val).strip() == ""
-            
-            # Gather AD-LEVEL insights across all matched campaigns, then pick
-            # the ad matching THIS row's exact variation name. Fetching at
-            # campaign level returned the same aggregate for every variation
-            # sharing a campaign (BM108.1/.2/.3 all filled identically).
-            ad_rows = []
-            for info in matched_infos:
-                ad_rows.extend(fetch_fb_ad_insights_for_campaign(info["id"], row_date_start, date_end, token))
 
-            best_fin = select_ad_metrics(ad_rows, search_term)
-            if not best_fin:
-                best_fin = {"spend": 0.0, "cpm": 0.0, "cpc": 0.0, "ctr": 0.0, "hook_rate": 0.0, "body_rate": 0.0, "impressions": 0.0}
-
-            fin = best_fin
-            
-            cpc_brl = fin["cpc"] * usd_to_brl
-            cpm_brl = fin["cpm"] * usd_to_brl
-            
-            # Fetch RedTrack dynamically for this row
+            # --- RedTrack (always, independent of the FB match) ---
             rt = fetch_rt_for_ad(search_term, row_date_start, date_end, redtrack_token)
             vendas = rt["vendas"]
             rt_cost_brl = rt["cost"]
             ic = rt["ic"]  # Initiate Checkout (RedTrack convtype1)
+            rt_has_data = (rt_cost_brl > 0 or vendas > 0 or ic > 0)
 
-            # Queue metric updates
-            cells_to_update.append(gspread.Cell(row=row_idx, col=5, value=fin["hook_rate"]))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=fin["body_rate"]))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=round(cpm_brl, 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=fin["ctr"]))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=round(cpc_brl, 2)))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=10, value=round(rt_cost_brl, 2))) # Pull Gasto from RedTrack
+            if matched_infos or rt_has_data:
+                cells_to_update.append(gspread.Cell(row=row_idx, col=10, value=round(rt_cost_brl, 2)))  # J Gasto
+                cells_to_update.append(gspread.Cell(row=row_idx, col=11, value=vendas))                  # K Vendas
+                cells_to_update.append(gspread.Cell(row=row_idx, col=14, value=ic))                      # N IC
 
-            cells_to_update.append(gspread.Cell(row=row_idx, col=11, value=vendas))
-            cells_to_update.append(gspread.Cell(row=row_idx, col=14, value=ic))  # Col N - Initiate Checkout
-            
-            cpa = 0
-            if vendas > 0:
-                cpa = rt_cost_brl / vendas
+                cpa = rt_cost_brl / vendas if vendas > 0 else 0
+                cells_to_update.append(gspread.Cell(row=row_idx, col=12, value=round(cpa, 2)))           # L CPA
+
+                # --- Facebook metrics (only when an ad matched) ---
+                # Gather AD-LEVEL insights across matched campaigns, then pick
+                # the ad matching THIS row's exact variation name. Fetching at
+                # campaign level returned the same aggregate for every variation
+                # sharing a campaign (BM108.1/.2/.3 all filled identically).
+                if matched_infos:
+                    ad_rows = []
+                    for info in matched_infos:
+                        ad_rows.extend(fetch_fb_ad_insights_for_campaign(info["id"], row_date_start, date_end, token))
+                    best_fin = select_ad_metrics(ad_rows, search_term)
+                    if best_fin:
+                        cpc_brl = best_fin["cpc"] * usd_to_brl
+                        cpm_brl = best_fin["cpm"] * usd_to_brl
+                        cells_to_update.append(gspread.Cell(row=row_idx, col=5, value=best_fin["hook_rate"]))  # E
+                        cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=best_fin["body_rate"]))  # F
+                        cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=round(cpm_brl, 2)))      # G
+                        cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=best_fin["ctr"]))        # H
+                        cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=round(cpc_brl, 2)))      # I
+
+                # Col M - Status auto-fill based on vendas and gasto (RedTrack).
+                # When marking VALIDADO/DESCARTADO, also stamp Col D (data fim)
+                # with the analysis end date — web_app pads date_end by +1 day, so
+                # subtract it back to match the date the user picked.
+                verdict_status = None
+                if vendas >= 3:
+                    verdict_status = "VALIDADO"
+                elif vendas == 2 and rt_cost_brl > 800:
+                    verdict_status = "VALIDADO"
+                elif vendas < 2 and rt_cost_brl >= 800:
+                    verdict_status = "DESCARTADO"
+                # else: gasto < 800 → don't alter column M / D
+
+                if verdict_status:
+                    cells_to_update.append(gspread.Cell(row=row_idx, col=13, value=verdict_status))
+                    if col_d_empty:
+                        try:
+                            end_dt = datetime.datetime.strptime(date_end, "%Y-%m-%d").date() - datetime.timedelta(days=1)
+                            data_fim_br = end_dt.strftime("%d/%m/%Y")
+                        except Exception:
+                            tz_brt = datetime.timezone(datetime.timedelta(hours=-3))
+                            data_fim_br = datetime.datetime.now(tz_brt).strftime("%d/%m/%Y")
+                        cells_to_update.append(gspread.Cell(row=row_idx, col=4, value=data_fim_br))
+
+                filled_metrics += 1
             else:
-                cpa = 0 # Forced fallback to 0
-                
-            cells_to_update.append(gspread.Cell(row=row_idx, col=12, value=round(cpa, 2)))
-
-            # Col M - Status auto-fill based on vendas and gasto.
-            # When marking VALIDADO/DESCARTADO, also stamp Col D (data fim)
-            # with the analysis end date — web_app pads date_end by +1 day, so
-            # subtract it back to match the date the user picked.
-            verdict_status = None
-            if vendas >= 3:
-                verdict_status = "VALIDADO"
-            elif vendas == 2 and rt_cost_brl > 800:
-                verdict_status = "VALIDADO"
-            elif vendas < 2 and rt_cost_brl >= 800:
-                verdict_status = "DESCARTADO"
-            # else: gasto < 800 → don't alter column M / D
-
-            if verdict_status:
-                cells_to_update.append(gspread.Cell(row=row_idx, col=13, value=verdict_status))
-                if col_d_empty:
-                    try:
-                        end_dt = datetime.datetime.strptime(date_end, "%Y-%m-%d").date() - datetime.timedelta(days=1)
-                        data_fim_br = end_dt.strftime("%d/%m/%Y")
-                    except Exception:
-                        tz_brt = datetime.timezone(datetime.timedelta(hours=-3))
-                        data_fim_br = datetime.datetime.now(tz_brt).strftime("%d/%m/%Y")
-                    cells_to_update.append(gspread.Cell(row=row_idx, col=4, value=data_fim_br))
-
-            filled_metrics += 1
+                # No FB match and no RedTrack data — nothing to fill.
+                not_found.append(str(ad_name_value))
         else:
             skipped_rows += 1
 
@@ -496,7 +575,7 @@ def fill_creative_tests(
     if progress_callback:
         progress_callback("Preenchendo seção PRÉ-ESCALA com datas dinâmicas...")
 
-    for row_idx in range(DATA_START_ROW, max_row + 1):
+    for row_idx in range(data_start, max_row + 1):
         row_data = all_values[row_idx - 1]
         creative_val = row_data[14] if len(row_data) > 14 else ""  # Col O
         if not creative_val or str(creative_val).strip() == "":
