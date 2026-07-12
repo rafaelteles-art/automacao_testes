@@ -55,12 +55,25 @@ def test_variation_exact_then_base():
     print("PASS: variation matches itself; base fallback only to non-dotted base ad")
 
 
-def test_fetch_all_ads_parses_campaign():
-    payload = {"data": [
-        {"id": "1", "name": "BM188", "campaign": {"id": "c1", "name": "[LOTTOV7] ABO - BM"}},
-        {"id": "2", "name": "BM189", "campaign": {"id": "c1", "name": "[LOTTOV7] ABO - BM"}},
-        {"id": "3", "name": "", "campaign": {"id": "c2", "name": "x"}},  # skipped (no name)
-    ], "paging": {}}
+def test_build_ad_index_from_insight_rows():
+    rows = [
+        {"ad_id": "1", "ad_name": "BM188", "campaign_id": "c1", "campaign_name": "[LOTTOV7] ABO - BM"},
+        {"ad_id": "2", "ad_name": "BM189", "campaign_id": "c1", "campaign_name": "[LOTTOV7] ABO - BM"},
+        {"ad_id": "1", "ad_name": "BM188", "campaign_id": "c1", "campaign_name": "[LOTTOV7] ABO - BM"},  # dup (2nd range)
+        {"ad_id": "3", "ad_name": "", "campaign_id": "c2", "campaign_name": "x"},  # skipped (no name)
+    ]
+    idx = fct.build_ad_index(rows)
+    assert set(idx.keys()) == {"bm188", "bm189"}, idx.keys()
+    assert len(idx["bm188"]) == 1, "same ad_id across ranges must be deduped"
+    assert idx["bm188"][0]["campaign_id"] == "c1"
+    assert idx["bm188"][0]["campaign_name"] == "[LOTTOV7] ABO - BM"
+    print("PASS: build_ad_index indexes and dedupes insight rows")
+
+
+def test_rt_report_cache_reuses_pull():
+    calls = {"n": 0}
+    payload = [{"rt_ad": "BM188", "convtype2": 1, "convtype1": 2, "cost": 10.0, "roas": 1.5},
+               {"rt_ad": "BM189", "convtype2": 0, "convtype1": 0, "cost": 5.0, "roas": 0}]
 
     class R:
         status_code = 200
@@ -68,20 +81,30 @@ def test_fetch_all_ads_parses_campaign():
         def json(self): return payload
 
     orig = fct.requests.get
-    fct.requests.get = lambda url, params=None, timeout=None: R()
+    fct.requests.get = lambda url, params=None, timeout=None: (calls.__setitem__("n", calls["n"] + 1), R())[1]
+    fct._rt_report_cache.clear()
     try:
-        idx = fct.fetch_all_ads(["act_123"], "tok")
-        assert set(idx.keys()) == {"bm188", "bm189"}, idx.keys()
-        assert idx["bm188"][0]["campaign_id"] == "c1"
-        assert idx["bm188"][0]["campaign_name"] == "[LOTTOV7] ABO - BM"
-        print("PASS: fetch_all_ads indexes ad names with campaign info")
+        a = fct.fetch_rt_for_ad("bm188", "2026-07-01", "2026-07-12", "tok")
+        b = fct.fetch_rt_for_ad("bm189", "2026-07-01", "2026-07-12", "tok")
+        assert a["cost"] == 10.0 and a["vendas"] == 1 and a["ic"] == 2
+        assert b["cost"] == 5.0
+        # Both rows have data on rt_ad (no sub4 fallback) and share the same
+        # date range, so a single HTTP pull serves them all — and a third row
+        # on the same range adds NO new calls.
+        n_after_two = calls["n"]
+        fct.fetch_rt_for_ad("bm188", "2026-07-01", "2026-07-12", "tok")
+        assert calls["n"] == n_after_two, f"cache miss: {calls['n']} != {n_after_two}"
+        assert n_after_two == 1, f"expected 1 cached HTTP pull, got {n_after_two}"
+        print("PASS: RedTrack report cached per range; repeat rows add no HTTP calls")
     finally:
         fct.requests.get = orig
+        fct._rt_report_cache.clear()
 
 
 if __name__ == "__main__":
     test_exact_ad_name_match()
     test_boundary_not_greedy()
     test_variation_exact_then_base()
-    test_fetch_all_ads_parses_campaign()
+    test_build_ad_index_from_insight_rows()
+    test_rt_report_cache_reuses_pull()
     print("\nAll tests passed.")

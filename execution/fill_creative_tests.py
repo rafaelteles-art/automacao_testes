@@ -90,65 +90,114 @@ def parse_excel_date(cell_value, default_date: str) -> str:
             return f"20{match_short.group(3)}-{match_short.group(2)}-{match_short.group(1)}"
     return default_date
 
-def fetch_fb_ad_insights_for_campaign(c_id, since, until, fb_token):
-    """Return a list of AD-level insight dicts for a campaign.
-
-    Campaign-level insights return one aggregate row, so every ad variation
-    that shares a campaign (BM108.1/.2/.3) would get identical Hook/Body/CPM/
-    CTR/CPC. Pulling at level='ad' keeps each variation separate; the caller
-    then selects the ad matching the row's exact name via select_ad_metrics().
-    """
-    url = f"https://graph.facebook.com/v19.0/{c_id}/insights"
-    params = {
-        'access_token': fb_token,
-        'fields': 'ad_id,ad_name,impressions,cpc,cpm,ctr,spend,actions,video_p75_watched_actions',
-        'level': 'ad',
-        'time_range': f'{{"since":"{since}","until":"{until}"}}',
-        'limit': 200,
-    }
-    out = []
-    import time
-    while url:
-        got_page = False
-        for _ in range(3):
-            r = requests.get(url, params=params, timeout=30)
-            if r.status_code == 200:
-                data = r.json()
-                for row in data.get('data', []):
-                    imps = float(row.get("impressions", 0) or 0)
-                    # Hook Rate (3s video views / impressions)
-                    video_3s_views = 0
-                    for act in row.get('actions', []) or []:
-                        if act.get('action_type') == 'video_view':
-                            video_3s_views = float(act.get('value', 0) or 0)
-                            break
-                    # Body/Hold Rate (75% watched / impressions)
-                    p75_actions = row.get('video_p75_watched_actions', []) or []
-                    p75 = float(p75_actions[0].get('value', 0) or 0) if p75_actions else 0
-                    out.append({
-                        "ad_id": row.get("ad_id", ""),
-                        "ad_name": row.get("ad_name", ""),
-                        "spend": float(row.get("spend", 0.0) or 0.0),
-                        "cpm": float(row.get("cpm", 0.0) or 0.0),
-                        "cpc": float(row.get("cpc", 0.0) or 0.0),
-                        "ctr": (float(row.get("ctr", 0.0) or 0.0) / 100),
-                        "hook_rate": (video_3s_views / imps) if imps > 0 else 0,
-                        "body_rate": (p75 / imps) if imps > 0 else 0,
-                        "impressions": imps,
-                    })
-                url = (data.get('paging', {}) or {}).get('next')
-                params = {}  # 'next' URL already carries params
-                got_page = True
-                break
-            elif r.status_code == 429 or r.status_code >= 500:
-                time.sleep(2)
-                continue
-            else:
-                url = None
-                break
-        if not got_page:
+def _parse_ad_insight_row(row):
+    """Convert one FB ad-level insight row into our metric dict."""
+    imps = float(row.get("impressions", 0) or 0)
+    # Hook Rate (3s video views / impressions)
+    video_3s_views = 0
+    for act in row.get('actions', []) or []:
+        if act.get('action_type') == 'video_view':
+            video_3s_views = float(act.get('value', 0) or 0)
             break
+    # Body/Hold Rate (75% watched / impressions)
+    p75_actions = row.get('video_p75_watched_actions', []) or []
+    p75 = float(p75_actions[0].get('value', 0) or 0) if p75_actions else 0
+    return {
+        "ad_id": row.get("ad_id", ""),
+        "ad_name": row.get("ad_name", ""),
+        "campaign_id": row.get("campaign_id", ""),
+        "campaign_name": row.get("campaign_name", ""),
+        "spend": float(row.get("spend", 0.0) or 0.0),
+        "cpm": float(row.get("cpm", 0.0) or 0.0),
+        "cpc": float(row.get("cpc", 0.0) or 0.0),
+        "ctr": (float(row.get("ctr", 0.0) or 0.0) / 100),
+        "hook_rate": (video_3s_views / imps) if imps > 0 else 0,
+        "body_rate": (p75 / imps) if imps > 0 else 0,
+        "impressions": imps,
+    }
+
+def fetch_fb_ad_insights_for_accounts(account_ids, since, until, fb_token, progress_callback=None):
+    """AD-level insights for whole accounts in one paginated sweep.
+
+    Insights only return ads that DELIVERED in [since, until], so this scales
+    with the active ads (hundreds) instead of the full /ads catalog (300k+ ads,
+    which took forever to page through). One sweep per distinct date range
+    replaces both the catalog fetch and the per-row insight calls.
+
+    level='ad' keeps each variation separate — campaign-level insights fed
+    BM108.1/.2/.3 the same aggregate (previous bug).
+    """
+    import time
+    out = []
+    for account_id in account_ids:
+        acc_raw = account_id.replace("act_", "")
+        url = f"https://graph.facebook.com/v19.0/act_{acc_raw}/insights"
+        params = {
+            'access_token': fb_token,
+            'fields': 'ad_id,ad_name,campaign_id,campaign_name,impressions,cpc,cpm,ctr,spend,actions,video_p75_watched_actions',
+            'level': 'ad',
+            'time_range': f'{{"since":"{since}","until":"{until}"}}',
+            'limit': 500,
+        }
+        while url:
+            success = False
+            last_status = None
+            last_body = None
+            for retry in range(6):
+                r = requests.get(url, params=params, timeout=60)
+                last_status = r.status_code
+                last_body = r.text[:500]
+                if r.status_code == 200:
+                    success = True
+                    break
+                is_rate_limit = False
+                try:
+                    err = r.json().get("error", {}) or {}
+                    if err.get("code") in (17, 4, 32, 613) or err.get("is_transient"):
+                        is_rate_limit = True
+                except Exception:
+                    pass
+                if r.status_code == 429 or r.status_code >= 500 or is_rate_limit:
+                    sleep_s = min(2 ** retry, 60)
+                    if progress_callback:
+                        progress_callback(f"⏳ FB rate limit em insights (conta {acc_raw}, status {r.status_code}). Retry {retry+1}/6 em {sleep_s}s...")
+                    time.sleep(sleep_s)
+                    continue
+                else:
+                    break
+
+            if not success:
+                msg = f"⚠️ Falha ao puxar insights da conta {acc_raw} (status {last_status}): {last_body}"
+                if progress_callback: progress_callback(msg)
+                raise RuntimeError(msg)
+
+            data = r.json()
+            for row in data.get("data", []):
+                out.append(_parse_ad_insight_row(row))
+            url = (data.get("paging", {}) or {}).get("next")
+            params = {}  # 'next' URL already carries params
     return out
+
+def build_ad_index(insight_rows):
+    """{ad_name_lower: [{ad_id, ad_name, campaign_id, campaign_name}]} from insight rows."""
+    idx = {}
+    seen = set()
+    for m in insight_rows:
+        name = str(m.get("ad_name", "") or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        dedupe = (key, m.get("ad_id"))
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        idx.setdefault(key, []).append({
+            "ad_id": m.get("ad_id"),
+            "ad_name": name,
+            "campaign_id": m.get("campaign_id"),
+            "campaign_name": m.get("campaign_name", ""),
+        })
+    return idx
 
 def select_ad_metrics(ad_rows, search_term):
     """Pick the ad matching this row's exact variation name.
@@ -171,73 +220,6 @@ def select_ad_metrics(ad_rows, search_term):
         return max(contains, key=lambda m: m.get("impressions", 0))
 
     return None
-
-def fetch_all_ads(account_ids, token, progress_callback=None):
-    """Build an index of Facebook ADS keyed by ad name.
-
-    The test codes (BM188, BM108.1, ...) live in the ad NAME, not the campaign
-    name, so indexing campaigns alone misses them. Returns:
-        ad_index: {ad_name_lower: [{ad_id, ad_name, campaign_id, campaign_name}]}
-    """
-    import time
-    ad_index = {}
-    total = 0
-    for account_id in account_ids:
-        acc_raw = account_id.replace("act_", "")
-        url = f"https://graph.facebook.com/v19.0/act_{acc_raw}/ads"
-        params = {"access_token": token, "fields": "id,name,campaign{id,name}", "limit": 500}
-        while url:
-            success = False
-            last_status = None
-            last_body = None
-            for retry in range(6):
-                r = requests.get(url, params=params, timeout=60)
-                last_status = r.status_code
-                last_body = r.text[:500]
-                if r.status_code == 200:
-                    success = True
-                    break
-                is_rate_limit = False
-                try:
-                    err = r.json().get("error", {}) or {}
-                    if err.get("code") in (17, 4, 32, 613) or err.get("is_transient"):
-                        is_rate_limit = True
-                except Exception:
-                    pass
-                if r.status_code == 429 or r.status_code >= 500 or is_rate_limit:
-                    sleep_s = min(2 ** retry, 60)
-                    if progress_callback:
-                        progress_callback(f"⏳ FB rate limit ao puxar anúncios (conta {acc_raw}, status {r.status_code}). Retry {retry+1}/6 em {sleep_s}s...")
-                    time.sleep(sleep_s)
-                    continue
-                else:
-                    break
-
-            if not success:
-                msg = f"⚠️ Falha ao puxar anúncios da conta {acc_raw} (status {last_status}): {last_body}"
-                if progress_callback: progress_callback(msg)
-                raise RuntimeError(msg)
-
-            data = r.json()
-            page_data = data.get("data", [])
-            for ad in page_data:
-                name = str(ad.get("name", "") or "").strip()
-                if not name:
-                    continue
-                camp = ad.get("campaign", {}) or {}
-                ad_index.setdefault(name.lower(), []).append({
-                    "ad_id": ad.get("id"),
-                    "ad_name": name,
-                    "campaign_id": camp.get("id"),
-                    "campaign_name": camp.get("name", ""),
-                })
-                total += 1
-            if progress_callback and total:
-                progress_callback(f"Catálogo de anúncios: {total} anúncios indexados...")
-            paging = data.get("paging", {})
-            url = paging.get("next")
-            params = {}
-    return ad_index
 
 def match_ads(ad_index, search_term):
     """Return the candidate FB ads for a sheet ad code.
@@ -272,13 +254,23 @@ def match_ads(ad_index, search_term):
                 hits.extend(ads)
     return hits
 
-def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
-    if not rt_token or not ad_name_lower:
-        return {"vendas": 0, "cost": 0.0, "roas": 0.0, "ic": 0}
-    
+# Cache of full RedTrack /report pulls keyed by (group, since, until).
+# ~100 sheet rows share a handful of date ranges, so pulling each report once
+# and filtering locally replaces hundreds of identical HTTP round-trips.
+_rt_report_cache = {}
+
+def fetch_rt_report(group_name, since, until, rt_token):
+    """Full RedTrack /report for one grouping+range, paginated and cached."""
+    key = (group_name, since, until)
+    if key in _rt_report_cache:
+        return _rt_report_cache[key]
+
     import time
-    
-    def internal_fetch(p_num, group_name):
+    rows = []
+    page = 1
+    complete = True
+    while page <= 5:
+        data, success = None, False
         for retry in range(4):
             try:
                 r = requests.get('https://api.redtrack.io/report', params={
@@ -287,59 +279,65 @@ def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
                     'date_to': until,
                     'group': group_name,
                     'limit': 1000,
-                    'page': p_num
+                    'page': page
                 }, timeout=30)
                 if r.status_code == 200:
-                    return r.json(), True
+                    data, success = r.json(), True
+                    break
                 elif r.status_code == 429 or r.status_code >= 500:
                     time.sleep(2 ** retry)
                     continue
                 else:
-                    return [], False
+                    break
             except requests.RequestException:
                 time.sleep(2 ** retry)
                 continue
-        return [], False
+        if not success:
+            complete = False
+            break
+        if not data:
+            break
+        rows.extend(data)
+        if len(data) < 1000:
+            break
+        page += 1
 
-    def fetch_and_sum(group_name):
+    # Only cache complete pulls — a transient failure must not poison the
+    # result for every row sharing this range; the next row retries.
+    if complete:
+        _rt_report_cache[key] = rows
+    return rows
+
+def fetch_rt_for_ad(ad_name_lower, since, until, rt_token):
+    if not rt_token or not ad_name_lower:
+        return {"vendas": 0, "cost": 0.0, "roas": 0.0, "ic": 0}
+
+    def sum_group(group_name):
         v = 0.0; c = 0.0; ro = 0.0; ic = 0.0
-        page = 1
-        while page <= 5:
-            rt_data, success = internal_fetch(page, group_name)
-            if not success or not rt_data: break
+        for r_row in fetch_rt_report(group_name, since, until, rt_token):
+            rt_val = str(r_row.get(group_name, '')).strip().lower()
+            if not rt_val: continue
 
-            for r_row in rt_data:
-                rt_val = str(r_row.get(group_name, '')).strip().lower()
-                if not rt_val: continue
+            is_match = False
+            if rt_val == ad_name_lower:
+                is_match = True
+            elif rt_val == ad_name_lower.split(" - ")[0].split(" ")[0]:
+                is_match = True
 
-                is_match = False
-                if rt_val == ad_name_lower:
-                    is_match = True
-                elif rt_val == ad_name_lower.split(" - ")[0].split(" ")[0]:
-                    is_match = True
-
-                if is_match:
-                    v += float(r_row.get('convtype2', 0))
-                    ic += float(r_row.get('convtype1', 0))  # Initiate Checkout (IC)
-                    c += float(r_row.get('cost', 0))
-                    roas_val = float(r_row.get('roas', 0))
-                    if roas_val != 0: ro = roas_val
-
-            if len(rt_data) < 1000: break
-            page += 1
+            if is_match:
+                v += float(r_row.get('convtype2', 0))
+                ic += float(r_row.get('convtype1', 0))  # Initiate Checkout (IC)
+                c += float(r_row.get('cost', 0))
+                roas_val = float(r_row.get('roas', 0))
+                if roas_val != 0: ro = roas_val
         return v, c, ro, ic
 
     # Try rt_ad first (default correct setup)
-    vendas, cost, roas, ic = fetch_and_sum("rt_ad")
+    vendas, cost, roas, ic = sum_group("rt_ad")
 
     # Fallback to sub4 if media buyer populated the wrong parameter (ex: LT1192)
     if vendas == 0 and cost == 0:
-        vendas, cost, roas, ic = fetch_and_sum("sub4")
-
-    # Double check API glitch
-    if vendas == 0 and cost == 0:
-        time.sleep(3)
-        vendas, cost, roas, ic = fetch_and_sum("rt_ad")
+        vendas, cost, roas, ic = sum_group("sub4")
 
     return {"vendas": vendas, "cost": cost, "roas": roas, "ic": ic}
 
@@ -366,38 +364,10 @@ def fill_creative_tests(
     except Exception as e:
         if progress_callback: progress_callback(f"⚠️ Erro ao obter dólar. Usando R$ 5.00.")
 
-    # 2. Fetch all ADS to build the catalog. Test codes live in the ad name
-    #    (BM188, BM108.1, ...), so we index ads by name. The campaign-name index
-    #    is derived from the same sweep as a fallback for older ads whose code
-    #    only appears in the campaign name.
-    if progress_callback: progress_callback("Construindo catálogo de Anúncios...")
-
-    ad_index = fetch_all_ads(account_ids, token, progress_callback)
-
-    ad_to_campaign = {}
-    seen_camp_per_key = {}
-    for ads in ad_index.values():
-        for ad in ads:
-            c_name = ad.get("campaign_name", "")
-            c_id = ad.get("campaign_id")
-            if not c_name:
-                continue
-            extracted = extract_ad_name_from_campaign(c_name)
-            if not extracted:
-                continue
-            key = extracted.strip().lower()
-            seen = seen_camp_per_key.setdefault(key, set())
-            if c_id in seen:
-                continue
-            seen.add(c_id)
-            ad_to_campaign.setdefault(key, []).append({"id": c_id, "name": c_name})
-
-    if not ad_index and not ad_to_campaign:
-        raise RuntimeError("Nenhum anúncio encontrado para as contas selecionadas.")
-
-    # 3. Read Google Sheets and Process Row-by-Row
+    # 2. Read Google Sheets FIRST — the rows dictate which FB date ranges we
+    #    actually need, so we only fetch what the sheet asks for.
     if progress_callback:
-        progress_callback("Varrendo Google Sheets e extraindo dados específicos por linha (Dynamic Dates)...")
+        progress_callback("Lendo Google Sheets para mapear linhas e períodos...")
 
     if not gc:
         raise RuntimeError("Cliente gspread não fornecido para autenticação.")
@@ -407,7 +377,7 @@ def fill_creative_tests(
         ws = sh.worksheet(sheet_name)
     except Exception as e:
         raise RuntimeError(f"Erro ao abrir Google Sheet. Verifique o link e se a aba existe: {e}")
-    
+
     all_values = ws.get_all_values()
     max_row = len(all_values)
     cells_to_update = []
@@ -428,6 +398,56 @@ def fill_creative_tests(
         if a == "TC" and b == "CRIATIVO":
             data_start = i + 2  # data begins on the row after the header
             break
+
+    # 3. One FB insights sweep per DISTINCT date range used by the TESTE rows.
+    #    Insights only return ads that delivered in the range, so this scales
+    #    with active ads instead of the 300k+ full /ads catalog (previous
+    #    bottleneck). The sweep doubles as the ad-name index for matching.
+    ranges = set()
+    for row_idx in range(data_start, max_row + 1):
+        row_data = all_values[row_idx - 1]
+        ad_name_value = row_data[1] if len(row_data) > 1 else ""  # Col B
+        if not ad_name_value or str(ad_name_value).strip() == "":
+            continue
+        status_val = row_data[12] if len(row_data) > 12 else ""  # Col M
+        if "TESTE" not in str(status_val).strip().upper():
+            continue
+        date_col_c = row_data[2] if len(row_data) > 2 else ""
+        ranges.add(parse_excel_date(date_col_c, date_start))
+
+    fb_rows_by_range = {}
+    all_insight_rows = []
+    for i, since in enumerate(sorted(ranges)):
+        if progress_callback:
+            progress_callback(f"Puxando insights do FB ({i+1}/{len(ranges)}: {since} → {date_end})...")
+        rows_r = fetch_fb_ad_insights_for_accounts(account_ids, since, date_end, token, progress_callback)
+        fb_rows_by_range[since] = rows_r
+        all_insight_rows.extend(rows_r)
+
+    if progress_callback:
+        progress_callback(f"Insights do FB: {len(all_insight_rows)} linhas de anúncios em {len(ranges)} período(s).")
+
+    ad_index = build_ad_index(all_insight_rows)
+
+    # Campaign-name index as fallback for older ads whose code only appears
+    # in the campaign name.
+    ad_to_campaign = {}
+    seen_camp_per_key = {}
+    for ads in ad_index.values():
+        for ad in ads:
+            c_name = ad.get("campaign_name", "")
+            c_id = ad.get("campaign_id")
+            if not c_name:
+                continue
+            extracted = extract_ad_name_from_campaign(c_name)
+            if not extracted:
+                continue
+            key = extracted.strip().lower()
+            seen = seen_camp_per_key.setdefault(key, set())
+            if c_id in seen:
+                continue
+            seen.add(c_id)
+            ad_to_campaign.setdefault(key, []).append({"id": c_id, "name": c_name})
 
     # Process TESTES Completos Section
     for row_idx in range(data_start, max_row + 1):
@@ -519,24 +539,29 @@ def fill_creative_tests(
                 cpa = rt_cost_brl / vendas if vendas > 0 else 0
                 cells_to_update.append(gspread.Cell(row=row_idx, col=12, value=round(cpa, 2)))           # L CPA
 
-                # --- Facebook metrics (only when an ad matched) ---
-                # Gather AD-LEVEL insights across matched campaigns, then pick
-                # the ad matching THIS row's exact variation name. Fetching at
-                # campaign level returned the same aggregate for every variation
-                # sharing a campaign (BM108.1/.2/.3 all filled identically).
-                if matched_infos:
-                    ad_rows = []
-                    for info in matched_infos:
-                        ad_rows.extend(fetch_fb_ad_insights_for_campaign(info["id"], row_date_start, date_end, token))
-                    best_fin = select_ad_metrics(ad_rows, search_term)
-                    if best_fin:
-                        cpc_brl = best_fin["cpc"] * usd_to_brl
-                        cpm_brl = best_fin["cpm"] * usd_to_brl
-                        cells_to_update.append(gspread.Cell(row=row_idx, col=5, value=best_fin["hook_rate"]))  # E
-                        cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=best_fin["body_rate"]))  # F
-                        cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=round(cpm_brl, 2)))      # G
-                        cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=best_fin["ctr"]))        # H
-                        cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=round(cpc_brl, 2)))      # I
+                # --- Facebook metrics (from the pre-fetched range sweep) ---
+                # Pick the ad matching THIS row's exact variation name from
+                # the insights already fetched for this row's date range —
+                # no extra HTTP call per row. level='ad' keeps variations
+                # separate (campaign level fed BM108.1/.2/.3 the same numbers).
+                range_rows = fb_rows_by_range.get(row_date_start, [])
+                best_fin = select_ad_metrics(range_rows, search_term)
+                if not best_fin and matched_infos:
+                    # Campaign-name fallback: the code lives in the campaign
+                    # name and the ad itself is named differently — take the
+                    # top ad (by impressions) of the matched campaigns.
+                    camp_ids = {str(info["id"]) for info in matched_infos}
+                    camp_rows = [m for m in range_rows if str(m.get("campaign_id")) in camp_ids]
+                    if camp_rows:
+                        best_fin = max(camp_rows, key=lambda m: m.get("impressions", 0))
+                if best_fin:
+                    cpc_brl = best_fin["cpc"] * usd_to_brl
+                    cpm_brl = best_fin["cpm"] * usd_to_brl
+                    cells_to_update.append(gspread.Cell(row=row_idx, col=5, value=best_fin["hook_rate"]))  # E
+                    cells_to_update.append(gspread.Cell(row=row_idx, col=6, value=best_fin["body_rate"]))  # F
+                    cells_to_update.append(gspread.Cell(row=row_idx, col=7, value=round(cpm_brl, 2)))      # G
+                    cells_to_update.append(gspread.Cell(row=row_idx, col=8, value=best_fin["ctr"]))        # H
+                    cells_to_update.append(gspread.Cell(row=row_idx, col=9, value=round(cpc_brl, 2)))      # I
 
                 # Col M - Status auto-fill based on vendas and gasto (RedTrack).
                 # When marking VALIDADO/DESCARTADO, also stamp Col D (data fim)

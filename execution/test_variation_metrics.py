@@ -19,24 +19,29 @@ import fill_creative_tests as fct
 # Simulated ad-level insight rows for ONE campaign holding three variations.
 _FAKE_AD_API = {
     "data": [
-        {"ad_id": "1", "ad_name": "BM108.1", "impressions": "1000", "spend": "10",
+        {"ad_id": "1", "ad_name": "BM108.1", "campaign_id": "c1", "campaign_name": "CAMP",
+         "impressions": "1000", "spend": "10",
          "cpm": "10.0", "ctr": "5.0", "cpc": "0.20",
          "actions": [{"action_type": "video_view", "value": "500"}],
          "video_p75_watched_actions": [{"value": "100"}]},
-        {"ad_id": "2", "ad_name": "BM108.2", "impressions": "2000", "spend": "40",
+        {"ad_id": "2", "ad_name": "BM108.2", "campaign_id": "c1", "campaign_name": "CAMP",
+         "impressions": "2000", "spend": "40",
          "cpm": "20.0", "ctr": "6.0", "cpc": "0.30",
          "actions": [{"action_type": "video_view", "value": "1400"}],
          "video_p75_watched_actions": [{"value": "300"}]},
-        {"ad_id": "3", "ad_name": "BM108.3", "impressions": "3000", "spend": "90",
+        {"ad_id": "3", "ad_name": "BM108.3", "campaign_id": "c1", "campaign_name": "CAMP",
+         "impressions": "3000", "spend": "90",
          "cpm": "30.0", "ctr": "7.0", "cpc": "0.40",
          "actions": [{"action_type": "video_view", "value": "2700"}],
          "video_p75_watched_actions": [{"value": "900"}]},
-    ]
+    ],
+    "paging": {},
 }
 
 
 class _FakeResp:
     status_code = 200
+    text = ""
 
     def json(self):
         return _FAKE_AD_API
@@ -50,7 +55,7 @@ def test_ad_level_variations_are_distinct():
     orig = fct.requests.get
     fct.requests.get = _fake_get
     try:
-        rows = fct.fetch_fb_ad_insights_for_campaign("camp1", "2026-07-01", "2026-07-12", "tok")
+        rows = fct.fetch_fb_ad_insights_for_accounts(["act_1"], "2026-07-01", "2026-07-12", "tok")
 
         m1 = fct.select_ad_metrics(rows, "bm108.1")
         m2 = fct.select_ad_metrics(rows, "bm108.2")
