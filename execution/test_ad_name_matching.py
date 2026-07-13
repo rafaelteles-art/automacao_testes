@@ -127,6 +127,70 @@ def test_derive_auto_date_start():
     print("PASS: auto start date = oldest TESTE date; fallback when none")
 
 
+def test_merge_insight_rows_rebuilds_rates():
+    # Same ad split across two half-ranges; merged must equal a single sweep.
+    half1 = {"ad_id": "1", "ad_name": "BM188", "campaign_id": "c1", "campaign_name": "X",
+             "impressions": 1000.0, "spend": 10.0, "cpm": 10.0, "cpc": 0.2,
+             "ctr": 0.05, "hook_rate": 0.5, "body_rate": 0.1}
+    half2 = {"ad_id": "1", "ad_name": "BM188", "campaign_id": "c1", "campaign_name": "X",
+             "impressions": 3000.0, "spend": 90.0, "cpm": 30.0, "cpc": 0.6,
+             "ctr": 0.05, "hook_rate": 0.9, "body_rate": 0.3}
+    merged = fct.merge_insight_rows([half1, half2])
+    assert len(merged) == 1
+    m = merged[0]
+    assert m["impressions"] == 4000.0 and m["spend"] == 100.0
+    assert abs(m["cpm"] - 25.0) < 1e-9            # 100/4000*1000
+    assert abs(m["ctr"] - 0.05) < 1e-9            # (50+150)/4000
+    assert abs(m["cpc"] - 0.5) < 1e-9             # 100/200 clicks
+    assert abs(m["hook_rate"] - 0.8) < 1e-9       # (500+2700)/4000
+    assert abs(m["body_rate"] - 0.25) < 1e-9      # (100+900)/4000
+    print("PASS: merge_insight_rows rebuilds rates exactly from split ranges")
+
+
+def test_adaptive_split_on_too_much_data():
+    import json as _json
+
+    def span_days(params):
+        tr = _json.loads(params["time_range"])
+        d0 = fct.datetime.datetime.strptime(tr["since"], "%Y-%m-%d").date()
+        d1 = fct.datetime.datetime.strptime(tr["until"], "%Y-%m-%d").date()
+        return (d1 - d0).days
+
+    class TooBig:
+        status_code = 500
+        text = '{"error":{"code":1,"message":"Please reduce the amount of data"}}'
+        def json(self): return {"error": {"code": 1, "message": "Please reduce the amount of data you're asking for, then retry your request"}}
+
+    class Ok:
+        status_code = 200
+        text = ""
+        def json(self):
+            return {"data": [{"ad_id": "1", "ad_name": "BM188", "campaign_id": "c1",
+                              "campaign_name": "X", "impressions": "1000", "spend": "10",
+                              "cpm": "10.0", "ctr": "5.0", "cpc": "0.20"}], "paging": {}}
+
+    def fake_get(url, params=None, timeout=None):
+        # Refuse windows longer than 3 days regardless of page size.
+        if params and "time_range" in params and span_days(params) > 3:
+            return TooBig()
+        return Ok()
+
+    orig = fct.requests.get
+    fct.requests.get = fake_get
+    try:
+        # 7-day window -> refused -> limit shrink (still refused) -> split into
+        # sub-windows of <=3 days -> leaves merged into ONE row per ad.
+        rows = fct.fetch_fb_ad_insights_for_accounts(["act_1"], "2026-07-01", "2026-07-08", "tok")
+        assert len(rows) == 1, [r.get("ad_name") for r in rows]
+        assert rows[0]["ad_name"] == "BM188"
+        assert rows[0]["spend"] == 20.0, rows[0]["spend"]  # 2 leaf windows x 10
+        assert rows[0]["impressions"] == 2000.0
+        assert abs(rows[0]["cpm"] - 10.0) < 1e-9  # rate preserved across merge
+        print("PASS: adaptive fetch splits refused windows and merges per ad")
+    finally:
+        fct.requests.get = orig
+
+
 if __name__ == "__main__":
     test_exact_ad_name_match()
     test_boundary_not_greedy()
@@ -134,4 +198,6 @@ if __name__ == "__main__":
     test_build_ad_index_from_insight_rows()
     test_rt_report_cache_reuses_pull()
     test_derive_auto_date_start()
+    test_merge_insight_rows_rebuilds_rates()
+    test_adaptive_split_on_too_much_data()
     print("\nAll tests passed.")

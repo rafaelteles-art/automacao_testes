@@ -144,6 +144,128 @@ def _parse_ad_insight_row(row):
         "impressions": imps,
     }
 
+class _FBTooMuchData(Exception):
+    """FB error code 1: 'Please reduce the amount of data you're asking for'."""
+    pass
+
+_INSIGHTS_FIELDS = 'ad_id,ad_name,campaign_id,campaign_name,impressions,cpc,cpm,ctr,spend,actions,video_p75_watched_actions'
+
+def _sweep_account_insights(acc_raw, since, until, fb_token, limit, progress_callback=None):
+    """One paginated ad-level insights sweep for one account and range.
+
+    Raises _FBTooMuchData when FB refuses the window size so the caller can
+    degrade (smaller pages, then split the date range).
+    """
+    import time
+    out = []
+    url = f"https://graph.facebook.com/v19.0/act_{acc_raw}/insights"
+    params = {
+        'access_token': fb_token,
+        'fields': _INSIGHTS_FIELDS,
+        'level': 'ad',
+        'time_range': f'{{"since":"{since}","until":"{until}"}}',
+        'limit': limit,
+    }
+    while url:
+        success = False
+        last_status = None
+        last_body = None
+        for retry in range(6):
+            r = requests.get(url, params=params, timeout=60)
+            last_status = r.status_code
+            last_body = r.text[:500]
+            if r.status_code == 200:
+                success = True
+                break
+            err = {}
+            try:
+                err = r.json().get("error", {}) or {}
+            except Exception:
+                pass
+            if "reduce the amount of data" in str(err.get("message", "")).lower():
+                raise _FBTooMuchData(f"conta {acc_raw} {since}->{until} limit={limit}")
+            if r.status_code == 429 or r.status_code >= 500 or err.get("code") in (17, 4, 32, 613) or err.get("is_transient"):
+                sleep_s = min(2 ** retry, 60)
+                if progress_callback:
+                    progress_callback(f"⏳ FB rate limit em insights (conta {acc_raw}, status {r.status_code}). Retry {retry+1}/6 em {sleep_s}s...")
+                time.sleep(sleep_s)
+                continue
+            break
+
+        if not success:
+            msg = f"⚠️ Falha ao puxar insights da conta {acc_raw} (status {last_status}): {last_body}"
+            if progress_callback: progress_callback(msg)
+            raise RuntimeError(msg)
+
+        data = r.json()
+        for row in data.get("data", []):
+            out.append(_parse_ad_insight_row(row))
+        url = (data.get("paging", {}) or {}).get("next")
+        params = {}  # 'next' URL already carries params
+    return out
+
+def merge_insight_rows(rows):
+    """Merge duplicate per-ad rows (from split date ranges) into one per ad.
+
+    Rates are rebuilt from raw components so a split sweep equals a single
+    sweep: clicks = ctr*imps, videos = hook*imps, p75 = body*imps — all exact
+    inversions of how _parse_ad_insight_row derived them.
+    """
+    acc = {}
+    order = []
+    for m in rows:
+        k = m.get("ad_id") or m.get("ad_name")
+        if k not in acc:
+            acc[k] = {
+                "meta": {f: m.get(f, "") for f in ("ad_id", "ad_name", "campaign_id", "campaign_name")},
+                "imps": 0.0, "spend": 0.0, "clicks": 0.0, "videos": 0.0, "p75": 0.0,
+            }
+            order.append(k)
+        a = acc[k]
+        imps = float(m.get("impressions", 0) or 0)
+        a["imps"] += imps
+        a["spend"] += float(m.get("spend", 0) or 0)
+        a["clicks"] += float(m.get("ctr", 0) or 0) * imps
+        a["videos"] += float(m.get("hook_rate", 0) or 0) * imps
+        a["p75"] += float(m.get("body_rate", 0) or 0) * imps
+    out = []
+    for k in order:
+        a = acc[k]
+        imps, spend, clicks = a["imps"], a["spend"], a["clicks"]
+        out.append({
+            **a["meta"],
+            "spend": spend,
+            "impressions": imps,
+            "cpm": (spend / imps * 1000) if imps > 0 else 0,
+            "cpc": (spend / clicks) if clicks > 0 else 0,
+            "ctr": (clicks / imps) if imps > 0 else 0,
+            "hook_rate": (a["videos"] / imps) if imps > 0 else 0,
+            "body_rate": (a["p75"] / imps) if imps > 0 else 0,
+        })
+    return out
+
+def _fetch_account_insights_adaptive(acc_raw, since, until, fb_token, progress_callback=None, limit=250):
+    """Sweep one account, degrading automatically when FB says 'too much data':
+    first shrink the page size, then split the date range in half and merge."""
+    try:
+        return _sweep_account_insights(acc_raw, since, until, fb_token, limit, progress_callback)
+    except _FBTooMuchData:
+        if limit > 50:
+            if progress_callback:
+                progress_callback(f"⚠️ FB pediu menos dados (conta {acc_raw}). Reduzindo página para 50...")
+            return _fetch_account_insights_adaptive(acc_raw, since, until, fb_token, progress_callback, limit=50)
+        d0 = datetime.datetime.strptime(since, "%Y-%m-%d").date()
+        d1 = datetime.datetime.strptime(until, "%Y-%m-%d").date()
+        if (d1 - d0).days < 1:
+            raise RuntimeError(f"⚠️ FB recusou até um único dia de insights (conta {acc_raw}, {since}). Sem como reduzir mais.")
+        mid = d0 + (d1 - d0) // 2
+        mid_next = mid + datetime.timedelta(days=1)
+        if progress_callback:
+            progress_callback(f"⚠️ Período grande demais para o FB (conta {acc_raw}). Dividindo: {since}→{mid} e {mid_next}→{until}...")
+        left = _fetch_account_insights_adaptive(acc_raw, since, mid.strftime("%Y-%m-%d"), fb_token, progress_callback, limit)
+        right = _fetch_account_insights_adaptive(acc_raw, mid_next.strftime("%Y-%m-%d"), until, fb_token, progress_callback, limit)
+        return merge_insight_rows(left + right)
+
 def fetch_fb_ad_insights_for_accounts(account_ids, since, until, fb_token, progress_callback=None):
     """AD-level insights for whole accounts in one paginated sweep.
 
@@ -153,57 +275,14 @@ def fetch_fb_ad_insights_for_accounts(account_ids, since, until, fb_token, progr
     replaces both the catalog fetch and the per-row insight calls.
 
     level='ad' keeps each variation separate — campaign-level insights fed
-    BM108.1/.2/.3 the same aggregate (previous bug).
+    BM108.1/.2/.3 the same aggregate (previous bug). Big windows on big
+    accounts trigger FB's 'reduce the amount of data' error; the adaptive
+    fetch shrinks pages and splits the range as needed.
     """
-    import time
     out = []
     for account_id in account_ids:
         acc_raw = account_id.replace("act_", "")
-        url = f"https://graph.facebook.com/v19.0/act_{acc_raw}/insights"
-        params = {
-            'access_token': fb_token,
-            'fields': 'ad_id,ad_name,campaign_id,campaign_name,impressions,cpc,cpm,ctr,spend,actions,video_p75_watched_actions',
-            'level': 'ad',
-            'time_range': f'{{"since":"{since}","until":"{until}"}}',
-            'limit': 500,
-        }
-        while url:
-            success = False
-            last_status = None
-            last_body = None
-            for retry in range(6):
-                r = requests.get(url, params=params, timeout=60)
-                last_status = r.status_code
-                last_body = r.text[:500]
-                if r.status_code == 200:
-                    success = True
-                    break
-                is_rate_limit = False
-                try:
-                    err = r.json().get("error", {}) or {}
-                    if err.get("code") in (17, 4, 32, 613) or err.get("is_transient"):
-                        is_rate_limit = True
-                except Exception:
-                    pass
-                if r.status_code == 429 or r.status_code >= 500 or is_rate_limit:
-                    sleep_s = min(2 ** retry, 60)
-                    if progress_callback:
-                        progress_callback(f"⏳ FB rate limit em insights (conta {acc_raw}, status {r.status_code}). Retry {retry+1}/6 em {sleep_s}s...")
-                    time.sleep(sleep_s)
-                    continue
-                else:
-                    break
-
-            if not success:
-                msg = f"⚠️ Falha ao puxar insights da conta {acc_raw} (status {last_status}): {last_body}"
-                if progress_callback: progress_callback(msg)
-                raise RuntimeError(msg)
-
-            data = r.json()
-            for row in data.get("data", []):
-                out.append(_parse_ad_insight_row(row))
-            url = (data.get("paging", {}) or {}).get("next")
-            params = {}  # 'next' URL already carries params
+        out.extend(_fetch_account_insights_adaptive(acc_raw, since, until, fb_token, progress_callback))
     return out
 
 def build_ad_index(insight_rows):
